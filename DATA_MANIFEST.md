@@ -31,8 +31,9 @@ PY=~/anaconda3/envs/shade/python.exe
 bash scripts/fetch_boston_open_data.sh       # idempotent; skips what exists
 $PY scripts/make_weather_scenarios.py
 $PY scripts/build_aoi.py --list
-$PY scripts/build_aoi.py --aoi dudley_square # ~15 s per 1 km² AOI at 1 m
-$PY scripts/smoke_test_solweig.py --aoi dudley_square
+$PY scripts/build_aoi.py --all               # 20 AOIs at the 2 m default, ~4 min
+$PY scripts/summarise_aois.py
+$PY scripts/smoke_test_solweig.py --aoi dudley_square  # GPU is disabled by default; see §8
 ```
 
 ---
@@ -86,10 +87,15 @@ scarce canopy is genuinely being extrapolated there — worth watching in the re
 the four heat metrics, and apportioned population with vulnerable-group percentages. That
 is both the context a policy prompt should see and the denominator the auditor needs.
 
-Build all 20 with `--all` (~5 min total), then `python scripts/summarise_aois.py`.
+Build all 20 with `--all` (~4 min total), then `python scripts/summarise_aois.py`.
+
+**Resolution convention.** The default is **2 m**, written to `data/aoi/<name>/`. Any
+other pixel size goes to `data/aoi/<name>_<res>m/`. 2 m is used for search and final
+scoring alike; 1 m is a spot-check only — section 8 has the measured cost and the reason
+not to compare across resolutions.
 
 Each build writes `dsm/dem/cdsm/landcover/dsm_raw` plus the four city heat rasters on one
-1 m grid in **EPSG:26986** (metres — SOLWEIG's shadow geometry needs a metric CRS), and an
+grid in **EPSG:26986** (metres — SOLWEIG's shadow geometry needs a metric CRS), and an
 `aoi.json` recording bbox, the vertical alignment offset, CDSM build statistics and every
 source URL.
 
@@ -164,7 +170,7 @@ carries its source in the JSON. Swap them before presenting any result as a reco
 
 ## 6. Data inventory
 
-### `data/aoi/` — built per study area (20 MB per AOI at 1 m)
+### `data/aoi/` — built per study area (~5 MB per AOI at 2 m, ~20 MB at 1 m)
 `dsm.tif` `dem.tif` `cdsm.tif` `landcover.tif` `dsm_raw.tif` `heat_ta3pm.tif`
 `heat_ta3am.tif` `heat_hours.tif` `heat_uhii.tif` `aoi.json`
 
@@ -223,16 +229,93 @@ Boston Logan TMYx 2011–2025 and TMY3 EPW, plus the four generated scenarios.
 
 ---
 
-## 8. Runtime, for planning the loop
+## 8. Runtime, and the GPU trap
 
-Measured on this machine, Dudley Square, 1001 × 1001 at 1 m:
+### Disable the GPU. This is not optional on a laptop.
 
-- AOI raster build: **~13 s** (network-bound)
-- SOLWEIG `SurfaceData.prepare` — sky-view factors and wall geometry: **minutes**, CPU.
-  **Cached in `working_dir` and independent of the weather**, so it is paid once per AOI
-  geometry.
+```python
+solweig.disable_gpu()   # BEFORE any other solweig call
+```
 
-That caching boundary is the thing to design the loop around: interventions that change
-geometry (trees, canopies) invalidate the SVF cache; interventions that only change albedo
-or land cover do not. Consider dropping to 2 m for the search and reserving 1 m for
-final scoring — it is a 4× cut in cost per evaluation.
+SOLWEIG sizes its SVF tiles against the GPU memory budget. This machine's integrated
+GPU reports **0.1 GiB of dedicated VRAM**, giving a 134 MB budget and capping
+`max_tile_side` at **528 px**. The shadow buffer it needs is `max_height / tan(3 deg)` --
+748 m for a 39 m building, so **748 px at 1 m resolution**. Since the buffer alone
+exceeds the tile cap, `core_tile_size` collapses to 1 and the tiler emits **one tile per
+pixel**: 1,002,001 tiles of 1497x1497 each, about 2.2e12 tile-pixels. It never finishes.
+A first attempt sat for 50 minutes without writing a byte.
+
+`disable_gpu()` moves the budget to RAM, lifting `max_tile_side` to 3429 px and removing
+tiling entirely for a 1 km2 AOI. `SOLWEIG_MAX_TILE_SIDE` does **not** help -- it only caps
+downward. Passing `tile_size=` explicitly does not help either; the validator clamps it
+against the same cap. On a machine with a real discrete GPU, leave the GPU on and re-check.
+
+The collapse threshold is `2 x ceil(748 / res) < 528`, i.e. **res > 2.8 m**. That is why
+4 m appeared to work while 1 m and 2 m both hung -- the cliff is discontinuous, and
+coarsening the grid was treating the symptom.
+
+### Measured cost
+
+Dudley Square, 1 km2, 4 timesteps, GPU disabled, 4-core i7-1065G7:
+
+| res | pixels | `prepare` (SVF) | `calculate` per step | cache | Tmrt mean | Tmrt max |
+|---|---|---|---|---|---|---|
+| 4 m | 63,001 | 9.3 s | 0.83 s | 10 MB | 49.0 C | 62.4 C |
+| 2 m | 251,001 | 21.1 s | 2.13 s | 40 MB | 48.2 C | 62.5 C |
+| 1 m | 1,002,001 | 128.8 s | 11.96 s | 157 MB | 47.8 C | 63.8 C |
+
+Reproduce with `python scripts/bench_resolution.py --aoi dudley_square --res 4,2,1`.
+
+**Halving the pixel size does not cost a constant factor** -- it gets more expensive the
+finer you go:
+
+| step | prepare | calc | cache | pixels |
+|---|---|---|---|---|
+| 4 m -> 2 m | x2.3 | x2.6 | x4.0 | x4.0 |
+| 2 m -> 1 m | x6.1 | x5.6 | x3.9 | x4.0 |
+
+Three scalings are superimposed. Pixel count is quadratic. Shadow casting marches in
+pixel-sized steps out to a fixed metre reach, so it adds another `1/res`, making the
+compute asymptotically **cubic**. Memory stays quadratic -- and the cache column confirms
+it, holding at x4.0 throughout. At 4 m the grid is small enough that fixed overheads
+dominate and the observed factor is only 2.3x; by 1 m the cubic term has taken over at
+6.1x. Extrapolating, 0.5 m would cost roughly 8x again: ~17 min of `prepare` per AOI.
+
+### What it costs per policy evaluation
+
+One evaluation = AOIs x scenarios x timesteps, serial:
+
+| setup | 1 m | 2 m | 4 m |
+|---|---|---|---|
+| full: 20 AOI x 4 scenarios x 4 steps | 1.8 h | 18 min | 8 min |
+| train only: 15 AOI x 2 scenarios x 3 steps | 50 min | 8 min | 4 min |
+| search subsample: 6 AOI x 2 scenarios x 3 steps | 20 min | 3 min | 1 min |
+
+**Recommendation: 2 m throughout, for search and final scoring alike.** At 2 m with a
+6-AOI rotating subsample a policy costs ~3 minutes, so a few hundred evaluations fit in an
+overnight run, and the full 20-AOI x 4-scenario final score is 18 minutes. 1 m on the full
+grid is an hour and three quarters per policy -- worth spending once on a survivor or two
+to confirm the ranking is not a grid artefact, but not as a scoring pass.
+
+Two further levers before reaching for more compute:
+
+- **AOIs are independent.** Four cores, so run 3-4 AOIs in parallel for close to 3x
+  throughput. This is the cheapest speedup available and it is not yet implemented.
+- **`prepare` is cached per AOI geometry and is weather-independent.** Albedo and
+  land-cover interventions (cool roofs, reflective pavement, depaving) reuse the cached
+  SVF entirely; only trees and canopies invalidate it. At 2 m that is the difference
+  between 21 s and 0 s per AOI. Ordering the search to batch geometry-preserving
+  candidates together is worth real time.
+
+### One caveat on coarsening
+
+Mean Tmrt drifts warm as the grid coarsens: 47.8 C at 1 m, 49.0 C at 4 m, because narrow
+shaded strips get averaged away. The bias is systematic and in one direction, so
+*comparisons between policies at a fixed resolution* stay sound -- which is all the search
+and the final ranking need. But absolute Tmrt values are biased, and cross-resolution
+comparison is not sound: never score one policy at 2 m against another at 1 m. Since
+everything runs at 2 m, the trap only opens if someone spot-checks at 1 m and then reads
+the two numbers side by side.
+
+Unrelated but noisy: SOLWEIG logs a Unicode check mark that crashes the Windows cp1252
+console encoder. Harmless, and silenced by `PYTHONIOENCODING=utf-8`.

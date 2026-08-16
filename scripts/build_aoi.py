@@ -1,12 +1,18 @@
 """Build a SOLWEIG-ready raster stack for one Boston study area (AOI).
 
 Pulls from live City of Boston / USGS image services plus the local land-cover
-raster, and writes every grid on the SAME 1 m grid in EPSG:26986 (MA State Plane
-Mainland, metres) so SOLWEIG's shadow geometry is in metres.
+raster, and writes every grid on ONE grid in EPSG:26986 (MA State Plane Mainland,
+metres) so SOLWEIG's shadow geometry is in metres.
 
-    python scripts/build_aoi.py --aoi nubian_square
+The default resolution is 2 m, used for both search and final scoring: about 6x
+cheaper per SOLWEIG evaluation than 1 m while still resolving street canyons and
+crown-scale shade. Build at 1 m with --res 1 only to spot-check that a result is
+not an artefact of the grid. See DATA_MANIFEST.md section 8.
+
+    python scripts/build_aoi.py --aoi nubian_square      # 2 m (default)
+    python scripts/build_aoi.py --aoi nubian_square --res 1
     python scripts/build_aoi.py --list
-    python scripts/build_aoi.py --neighborhood Roxbury --res 2
+    python scripts/build_aoi.py --neighborhood Roxbury
 
 Outputs (data/aoi/<name>/):
     dsm.tif          ground + buildings, metres AMSL   -> SOLWEIG `dsm`
@@ -38,6 +44,8 @@ _PREFIX = Path(sys.executable).parent
 for _var, _sub in (("GDAL_DATA", "Library/share/gdal"), ("PROJ_LIB", "Library/share/proj")):
     if _var not in os.environ and (_PREFIX / _sub).is_dir():
         os.environ[_var] = str(_PREFIX / _sub)
+# SOLWEIG logs a Unicode check mark that the Windows cp1252 console cannot encode.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import numpy as np
 import rasterio
@@ -78,6 +86,11 @@ BOSTON_TO_UMEP = {0: 1, 1: 4, 2: 5, 3: 6, 4: 7, 5: 2, 6: 1, 7: 1}
 
 # Requests bigger than this (per axis) get tiled; services cap at 4100-8000 px.
 MAX_PX = 4000
+
+# Default pixel size in metres, used for search and final scoring alike. Changing
+# this changes which directory counts as the default build (see the suffix logic
+# in main()).
+DEFAULT_RES = 2.0
 
 
 # --------------------------------------------------------------------------- #
@@ -377,7 +390,10 @@ def main() -> None:
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("MINX", "MINY", "MAXX", "MAXY"),
                     help="explicit bbox in EPSG:26986")
     ap.add_argument("--name", help="output name when using --bbox/--neighborhood")
-    ap.add_argument("--res", type=float, default=1.0, help="pixel size in metres (default 1)")
+    ap.add_argument("--res", type=float, default=None,
+                    help=f"pixel size in metres; overrides config. Default {DEFAULT_RES:g} m, "
+                         f"which builds to data/aoi/<name>/. Any other resolution builds to "
+                         f"data/aoi/<name>_<res>m/, useful for grid spot-checks.")
     ap.add_argument("--all", action="store_true", help="build every AOI in config/aois.json")
     ap.add_argument("--list", action="store_true", help="list configured AOIs and exit")
     args = ap.parse_args()
@@ -388,22 +404,25 @@ def main() -> None:
             print(f"{key:24s} {spec['split']:8s} {spec['label']}")
         return
 
+    res_default = args.res if args.res is not None else DEFAULT_RES
     jobs = []
     if args.all:
-        jobs = [(k, tuple(v["bbox_26986"]), v.get("res", args.res)) for k, v in aois["aois"].items()]
+        jobs = [(k, tuple(v["bbox_26986"]), args.res or v.get("res", DEFAULT_RES))
+                for k, v in aois["aois"].items()]
     elif args.aoi:
         spec = aois["aois"][args.aoi]
-        jobs = [(args.aoi, tuple(spec["bbox_26986"]), spec.get("res", args.res))]
+        jobs = [(args.aoi, tuple(spec["bbox_26986"]), args.res or spec.get("res", DEFAULT_RES))]
     elif args.neighborhood:
         name = args.name or args.neighborhood.lower().replace(" ", "_")
-        jobs = [(name, neighborhood_bbox(args.neighborhood), args.res)]
+        jobs = [(name, neighborhood_bbox(args.neighborhood), res_default)]
     elif args.bbox:
-        jobs = [(args.name or "custom", tuple(args.bbox), args.res)]
+        jobs = [(args.name or "custom", tuple(args.bbox), res_default)]
     else:
         ap.error("one of --aoi / --all / --neighborhood / --bbox is required")
 
     for name, bbox, res in jobs:
-        build(name, bbox, res, DATA / "aoi" / name)
+        suffix = "" if abs(res - DEFAULT_RES) < 1e-9 else f"_{res:g}m"
+        build(name, bbox, res, DATA / "aoi" / f"{name}{suffix}")
 
 
 if __name__ == "__main__":

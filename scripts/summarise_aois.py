@@ -20,6 +20,8 @@ _PREFIX = Path(sys.executable).parent
 for _var, _sub in (("GDAL_DATA", "Library/share/gdal"), ("PROJ_LIB", "Library/share/proj")):
     if _var not in os.environ and (_PREFIX / _sub).is_dir():
         os.environ[_var] = str(_PREFIX / _sub)
+# SOLWEIG logs a Unicode check mark that the Windows cp1252 console cannot encode.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import geopandas as gpd
 import numpy as np
@@ -47,12 +49,15 @@ def main() -> None:
     svi["_area"] = svi.geometry.area
     aois = json.loads((ROOT / "config" / "aois.json").read_text())["aois"]
 
+    # Only the default-resolution builds: <name>/ is the working stack, while
+    # <name>_1m/ and friends are variants that would otherwise double the rows.
     rows = []
-    for name in sorted(p.name for p in AOI_DIR.iterdir() if p.is_dir()):
+    for name in sorted(aois):
         d = AOI_DIR / name
         if not (d / "aoi.json").exists():
             continue
         meta = json.loads((d / "aoi.json").read_text())
+        res = meta["resolution_m"]
         lc = rasterio.open(d / "landcover.tif").read(1)
         cdsm = raster(d / "cdsm.tif")
         dsm, dem = raster(d / "dsm.tif"), raster(d / "dem.tif")
@@ -75,6 +80,7 @@ def main() -> None:
         total = pop["POP100_RE"] or 1.0
         rows.append({
             "aoi": name,
+            "res_m": res,
             "split": aois.get(name, {}).get("split", "?"),
             "label": aois.get(name, {}).get("label", ""),
             "canopy_pct": round(100 * (lc == 4).mean(), 1),
@@ -97,7 +103,7 @@ def main() -> None:
             "pct_limited_english": round(100 * pop["LEP"] / total, 1),
             "crowns": meta.get("cdsm_build", {}).get("crowns_painted", 0),
         })
-        print(f"  {name:24s} canopy {rows[-1]['canopy_pct']:4.1f}%  "
+        print(f"  {name:24s} {res:g}m  canopy {rows[-1]['canopy_pct']:4.1f}%  "
               f"UHII {rows[-1]['uhii_mean_c']:4.2f}C  pop {rows[-1]['population']:5d}")
 
     out = AOI_DIR / "summary.csv"
