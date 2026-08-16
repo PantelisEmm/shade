@@ -3,19 +3,20 @@
 Everything the autoresearch loop in *Project Proposal.docx* needs to run against real
 Boston, assembled and checked. SOLWEIG (`UMEP-dev/solweig`) is the simulator.
 
-**Status:** all sources below are downloaded and validated. One AOI (Dudley Square /
-Nubian) is built end-to-end as a worked example; the other 19 are one command each.
+**Status:** all sources downloaded and validated; all 20 AOI raster stacks built (386 MB)
+and profiled in `data/aoi/summary.csv`; the four climate scenarios generated.
 
 ```
 shade/
 ├── config/
-│   ├── aois.json              20 study areas (15 train / 5 held out)
+│   ├── aois.json              20 study areas, split stratified on heat
 │   └── interventions.json     cooling actions: physics + unit costs
 ├── data/                      ~2.0 GB, see inventory below
 ├── scripts/
 │   ├── env_setup.sh           conda env `shade` (py3.12 + geo stack + solweig)
 │   ├── fetch_boston_open_data.sh   re-runnable bulk download
 │   ├── build_aoi.py           → SOLWEIG-ready raster stack for one AOI
+│   ├── summarise_aois.py      → data/aoi/summary.csv, per-AOI profile
 │   ├── make_weather_scenarios.py   → EPW files per climate scenario
 │   └── smoke_test_solweig.py  end-to-end check
 └── DATA_MANIFEST.md
@@ -70,13 +71,22 @@ Dudley Square — the right shape for Roxbury, which is the check that the units
 exact unit the Climate Action Plan's *Cool Main Streets* goal names, and the proposal's
 target is the process for choosing among them.
 
-- **train (15):** Dudley Square, Uphams Corner, Fields Corner, Egleston Square, Grove Hall,
-  Four Corners, Bowdoin/Geneva, Chinatown, East Boston, Mattapan, Allston Village,
-  Mission Hill, Centre/South, Washington St Gateway, West Roxbury
-- **held out (5):** Greater Ashmont, Roslindale Village, Brighton, 3 Squares, Hyde Park
+- **held out (5):** Mission Hill, Fields Corner, East Boston, Centre/South, West Roxbury
+- **train (15):** the rest
 
-The held-out set spans the same heat and density range as the training set, so it tests
-generalisation rather than extrapolation. Build all 20 with `--all`.
+The split is **stratified on the heat gradient**, not chosen by hand: districts are sorted
+by mean UHII and every 4th is held out, with the hottest (Chinatown, 5.87 °C) and coolest
+(Mattapan, 1.32 °C) kept in training. Held-out spans UHII 1.60–4.43 °C and canopy
+12.2–38.4 %, nested inside training's 1.32–5.87 °C and 8.4–32.0 %. So it tests
+interpolation across the range rather than extrapolation past its edge. The one exception:
+Centre/South at 38.4 % canopy is greener than anything in training, so a policy tuned to
+scarce canopy is genuinely being extrapolated there — worth watching in the results.
+
+`data/aoi/summary.csv` profiles all 20: land-cover shares, canopy and building heights,
+the four heat metrics, and apportioned population with vulnerable-group percentages. That
+is both the context a policy prompt should see and the denominator the auditor needs.
+
+Build all 20 with `--all` (~5 min total), then `python scripts/summarise_aois.py`.
 
 Each build writes `dsm/dem/cdsm/landcover/dsm_raw` plus the four city heat rasters on one
 1 m grid in **EPSG:26986** (metres — SOLWEIG's shadow geometry needs a metric CRS), and an

@@ -69,3 +69,12 @@ crown inventory instead).
 - Keep `data/` and `runs/` out of commits — if you add a new data source, add the
   download step to `scripts/fetch_boston_open_data.sh` and document it in
   `DATA_MANIFEST.md` so others can fetch it themselves.
+
+## License
+
+Code in this repository is released under the [MIT License](LICENSE).
+
+Note that the license covers the code only. Data under `data/` is not
+distributed here and carries the terms of its original providers (City of
+Boston Open Data, the Canopy Change Assessment, USGS 3DEP, and Climate.OneBuilding
+TMYx weather) — see `DATA_MANIFEST.md` for per-source provenance.
