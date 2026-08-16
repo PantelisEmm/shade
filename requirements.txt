@@ -1,0 +1,23 @@
+# pip alternative to environment.yml, for collaborators not using conda.
+# environment.yml is the source of truth — keep these in sync.
+#
+#   python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Note: this pulls GDAL in through rasterio/fiona wheels. That works on
+# recent Linux/macOS/Windows, but if a build fails, use conda instead.
+geopandas
+numpy
+pyproj
+rasterio
+requests
+fiona
+shapely
+matplotlib
+netCDF4
+pandas
+rioxarray
+scipy
+tqdm
+xarray
+solweig

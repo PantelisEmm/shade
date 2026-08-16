@@ -1,0 +1,13 @@
+# Normalize line endings so Windows/macOS/Linux collaborators don't fight over them
+* text=auto eol=lf
+
+# Shell scripts must stay LF
+*.sh text eol=lf
+
+# Binary / data formats — never touch
+*.docx  binary
+*.pdf   binary
+*.xlsx  binary
+*.tif   binary
+*.zip   binary
+*.epw   text

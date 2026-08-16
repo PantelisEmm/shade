@@ -1,0 +1,38 @@
+# Conda environment for SHADE. Source of truth for dependencies.
+#
+#   conda env create -f environment.yml     # or: bash scripts/env_setup.sh
+#   conda activate shade
+#
+# The geospatial stack (GDAL/rasterio/geopandas/fiona) is installed from
+# conda-forge rather than pip — the binary GDAL dependency is what makes
+# conda worth it here.
+name: shade
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+
+  # imported directly by scripts/
+  - geopandas
+  - numpy
+  - pyproj
+  - rasterio
+  - requests
+
+  # geospatial stack / transitive but pinned to conda-forge builds on purpose
+  - fiona
+  - gdal
+  - shapely
+
+  # used by solweig and for analysis of outputs
+  - matplotlib
+  - netcdf4
+  - pandas
+  - rioxarray
+  - scipy
+  - tqdm
+  - xarray
+
+  - pip
+  - pip:
+      - solweig

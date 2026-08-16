@@ -1,0 +1,367 @@
+{
+  "crs": "EPSG:26986",
+  "description": "Study areas for the SHADE loop: 1 km x 1 km windows centred on Boston Main Streets districts, the unit the Climate Action Plan's 'Cool Main Streets' goal targets. `train` AOIs are visible to the policy-evolution loop; `held_out` AOIs are scored only after the search finishes.",
+  "window_m": 1000.0,
+  "aois": {
+    "3_squares": {
+      "label": "3 Squares",
+      "main_streets_district": "THREE SQUARES",
+      "split": "held_out",
+      "res": 1.0,
+      "bbox_26986": [
+        231983.9,
+        896429.1,
+        232983.9,
+        897429.1
+      ],
+      "district_bbox_26986": [
+        232009.6,
+        896626.1,
+        232958.1,
+        897232.1
+      ]
+    },
+    "brighton": {
+      "label": "Brighton",
+      "main_streets_district": "BRIGHTON",
+      "split": "held_out",
+      "res": 1.0,
+      "bbox_26986": [
+        227534.5,
+        899523.7,
+        228534.5,
+        900523.7
+      ],
+      "district_bbox_26986": [
+        226945.0,
+        899722.2,
+        229124.0,
+        900325.2
+      ]
+    },
+    "greater_ashmont": {
+      "label": "Greater Ashmont",
+      "main_streets_district": "GREATER ASHMONT",
+      "split": "held_out",
+      "res": 1.0,
+      "bbox_26986": [
+        235515.4,
+        892730.3,
+        236515.4,
+        893730.3
+      ],
+      "district_bbox_26986": [
+        235822.8,
+        892399.2,
+        236208.1,
+        894061.5
+      ]
+    },
+    "hyde_park": {
+      "label": "Hyde Park",
+      "main_streets_district": "HYDE PARK",
+      "split": "held_out",
+      "res": 1.0,
+      "bbox_26986": [
+        230620.8,
+        889016.4,
+        231620.8,
+        890016.4
+      ],
+      "district_bbox_26986": [
+        230830.6,
+        889124.5,
+        231411.1,
+        889908.3
+      ]
+    },
+    "roslindale_village": {
+      "label": "Roslindale Village",
+      "main_streets_district": "ROSLINDALE VILLAGE",
+      "split": "held_out",
+      "res": 1.0,
+      "bbox_26986": [
+        230066.4,
+        892479.3,
+        231066.4,
+        893479.3
+      ],
+      "district_bbox_26986": [
+        230364.8,
+        892790.2,
+        230768.0,
+        893168.4
+      ]
+    },
+    "allston_village": {
+      "label": "Allston Village",
+      "main_streets_district": "ALLSTON VILLAGE",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        229664.6,
+        899784.8,
+        230664.6,
+        900784.8
+      ],
+      "district_bbox_26986": [
+        229768.4,
+        899866.7,
+        230560.7,
+        900702.9
+      ]
+    },
+    "bowdoin_geneva": {
+      "label": "Bowdoin/Geneva",
+      "main_streets_district": "BOWDOIN GENEVA",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        235199.0,
+        894542.2,
+        236199.0,
+        895542.2
+      ],
+      "district_bbox_26986": [
+        235264.4,
+        894388.1,
+        236133.6,
+        895696.3
+      ]
+    },
+    "centre_south": {
+      "label": "Centre/South",
+      "main_streets_district": "JP CENTRE/SOUTH",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        231332.8,
+        895152.4,
+        232332.8,
+        896152.4
+      ],
+      "district_bbox_26986": [
+        231634.0,
+        894657.8,
+        232031.6,
+        896647.0
+      ]
+    },
+    "chinatown": {
+      "label": "Chinatown",
+      "main_streets_district": "CHINATOWN",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        235663.4,
+        899690.7,
+        236663.4,
+        900690.7
+      ],
+      "district_bbox_26986": [
+        236015.8,
+        900064.2,
+        236311.0,
+        900317.1
+      ]
+    },
+    "dudley_square": {
+      "label": "Dudley Square",
+      "main_streets_district": "DUDLEY SQUARE",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        233822.9,
+        897267.2,
+        234822.9,
+        898267.2
+      ],
+      "district_bbox_26986": [
+        233967.2,
+        897323.1,
+        234678.7,
+        898211.2
+      ]
+    },
+    "east_boston": {
+      "label": "East Boston",
+      "main_streets_district": "EAST BOSTON",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        237499.3,
+        902050.7,
+        238499.3,
+        903050.7
+      ],
+      "district_bbox_26986": [
+        237782.4,
+        902118.7,
+        238216.2,
+        902982.6
+      ]
+    },
+    "egleston_square": {
+      "label": "Egleston Square",
+      "main_streets_district": "EGLESTON SQUARE",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        232529.8,
+        895641.2,
+        233529.8,
+        896641.2
+      ],
+      "district_bbox_26986": [
+        232768.3,
+        895791.1,
+        233291.2,
+        896491.2
+      ]
+    },
+    "fields_corner": {
+      "label": "Fields Corner",
+      "main_streets_district": "FIELDS CORNER",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        235708.8,
+        894198.2,
+        236708.8,
+        895198.2
+      ],
+      "district_bbox_26986": [
+        235973.6,
+        894070.7,
+        236443.9,
+        895325.8
+      ]
+    },
+    "four_corners": {
+      "label": "Four Corners",
+      "main_streets_district": "FOUR CORNERS",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        234448.2,
+        894019.5,
+        235448.2,
+        895019.5
+      ],
+      "district_bbox_26986": [
+        234563.8,
+        893959.6,
+        235332.6,
+        895079.4
+      ]
+    },
+    "grove_hall": {
+      "label": "Grove Hall",
+      "main_streets_district": "GREATER GROVE HALL",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        234047.3,
+        895244.9,
+        235047.3,
+        896244.9
+      ],
+      "district_bbox_26986": [
+        234183.7,
+        894876.0,
+        234910.8,
+        896613.8
+      ]
+    },
+    "mattapan": {
+      "label": "Mattapan",
+      "main_streets_district": "MATTAPAN",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        232949.7,
+        890578.6,
+        233949.7,
+        891578.6
+      ],
+      "district_bbox_26986": [
+        233277.7,
+        890734.8,
+        233621.7,
+        891422.3
+      ]
+    },
+    "mission_hill": {
+      "label": "Mission Hill",
+      "main_streets_district": "MISSION HILL",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        232127.3,
+        897688.8,
+        233127.3,
+        898688.8
+      ],
+      "district_bbox_26986": [
+        231921.4,
+        897755.7,
+        233333.2,
+        898622.0
+      ]
+    },
+    "uphams_corner": {
+      "label": "Uphams Corner",
+      "main_streets_district": "UPHAMS CORNER",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        235311.8,
+        895764.2,
+        236311.8,
+        896764.2
+      ],
+      "district_bbox_26986": [
+        235356.9,
+        895696.7,
+        236266.7,
+        896831.6
+      ]
+    },
+    "washington_st_gateway": {
+      "label": "Washington St Gateway",
+      "main_streets_district": "WASHINGTON GATEWAY",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        234707.7,
+        898385.8,
+        235707.7,
+        899385.8
+      ],
+      "district_bbox_26986": [
+        234453.1,
+        898105.7,
+        235962.3,
+        899665.9
+      ]
+    },
+    "west_roxbury": {
+      "label": "West Roxbury",
+      "main_streets_district": "WEST ROXBURY",
+      "split": "train",
+      "res": 1.0,
+      "bbox_26986": [
+        227474.9,
+        891657.1,
+        228474.9,
+        892657.1
+      ],
+      "district_bbox_26986": [
+        226926.6,
+        891183.0,
+        229023.2,
+        893131.2
+      ]
+    }
+  }
+}

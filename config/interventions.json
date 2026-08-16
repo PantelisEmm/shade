@@ -1,0 +1,105 @@
+{
+  "description": "The cooling actions a SHADE policy is allowed to place, with the physical edit each one makes to the SOLWEIG raster stack and an order-of-magnitude unit cost. The physical parameters are the ones Boston's own heat study used, so a policy evaluated here is being scored against the same assumptions the city planned with. The costs are NOT city figures -- see cost_caveat.",
+  "physics_source": "Klimaat Consulting & Innovation, 'Neighbourhood Urban Climate Simulation', Appendix 2 to Heat Resilience Solutions for Boston (2021-09-24), Appendix A layer specifications. Local copy: data/heat/Appendix2_NeighborhoodClimateSimulationModeling.pdf",
+  "cost_caveat": "Unit costs are public order-of-magnitude figures from other cities' programmes and trade sources, carried here so the cost-efficiency objective has a scale to work with. They are the weakest numbers in the stack. Replace them with Boston capital-budget figures before any result is presented as a recommendation.",
+
+  "baseline_surfaces": {
+    "base_layer": {"material": "asphalt over concrete", "albedo": 0.12, "conductivity_w_mk": 1.2, "heat_capacity_mj_m3k": 1.9},
+    "open_space": {"material": "concrete", "albedo": 0.25, "conductivity_w_mk": 0.8, "heat_capacity_mj_m3k": 1.33},
+    "dark_roof": {"material": "dark coloured roof", "albedo": 0.08, "conductivity_w_mk": 0.6, "heat_capacity_mj_m3k": 1.4},
+    "water": {"material": "water", "albedo": 0.08, "conductivity_w_mk": 0.6, "heat_capacity_mj_m3k": 4.2}
+  },
+
+  "interventions": {
+    "light_road": {
+      "label": "High-SRI reflective road coating",
+      "applies_to_landcover": [1],
+      "raster_edit": {"albedo": 0.45, "landcover": "unchanged"},
+      "baseline_albedo": 0.12,
+      "reported_effect": "Boston study: afternoon surface temperature 104F -> 93F; perceived temperature 90F -> 88.6F. Shade still dominates over albedo for pedestrian comfort.",
+      "unit": "m2",
+      "cost_usd_per_unit": 8.0,
+      "cost_source": "CoolSeal applied cost ~$5-14/sq yd (Phoenix); ~$2/sq yd material-only (Raleigh). Midpoint converted to m2.",
+      "lifetime_years": 8
+    },
+    "cool_roof": {
+      "label": "Light-coloured / cool roof",
+      "applies_to_landcover": [2],
+      "raster_edit": {"albedo": 0.50, "landcover": "unchanged"},
+      "baseline_albedo": 0.08,
+      "unit": "m2",
+      "cost_usd_per_unit": 25.0,
+      "cost_source": "Order-of-magnitude for reflective roof coating; replace with BERDO/city retrofit figures.",
+      "lifetime_years": 15
+    },
+    "green_roof": {
+      "label": "Green roof",
+      "applies_to_landcover": [2],
+      "raster_edit": {"albedo": 0.25, "landcover": 5, "lai": 2.88},
+      "unit": "m2",
+      "cost_usd_per_unit": 250.0,
+      "cost_source": "Order-of-magnitude extensive green roof installed cost.",
+      "lifetime_years": 30
+    },
+    "grass_conversion": {
+      "label": "Depave to grass / low vegetation",
+      "applies_to_landcover": [1],
+      "raster_edit": {"albedo": 0.25, "landcover": 5, "lai": 2.88},
+      "unit": "m2",
+      "cost_usd_per_unit": 90.0,
+      "cost_source": "Order-of-magnitude depaving + planting.",
+      "lifetime_years": 30
+    },
+    "tree_small": {
+      "label": "Small street tree",
+      "raster_edit": {"cdsm_height_m": 5.0, "crown_radius_m": 1.5, "landcover": 4},
+      "transmissivity": 0.08,
+      "unit": "tree",
+      "cost_usd_per_unit": 1800.0,
+      "cost_source": "Order-of-magnitude planting + 2-year establishment watering, which Boston's contractor provides.",
+      "lifetime_years": 40,
+      "establishment_years": 2
+    },
+    "tree_medium": {
+      "label": "Medium street tree",
+      "raster_edit": {"cdsm_height_m": 5.0, "crown_radius_m": 2.5, "landcover": 4},
+      "transmissivity": 0.08,
+      "unit": "tree",
+      "cost_usd_per_unit": 2600.0,
+      "cost_source": "Order-of-magnitude; larger stock, larger pit.",
+      "lifetime_years": 40,
+      "establishment_years": 2,
+      "reported_effect": "Boston study, trees on the north side of the street: afternoon surface temperature 105F -> 90F, perceived temperature 90F -> 85F. The largest single-measure effect in their tests."
+    },
+    "shade_canopy": {
+      "label": "Shade cloth canopy / awning",
+      "raster_edit": {"cdsm_height_m": 3.0, "landcover": "unchanged"},
+      "albedo": 0.25,
+      "solar_transmission": 0.5,
+      "unit": "m2",
+      "cost_usd_per_unit": 200.0,
+      "cost_source": "Shade sails ~$12-35/sq ft installed; midpoint converted to m2.",
+      "lifetime_years": 12
+    },
+    "solar_canopy": {
+      "label": "PV solar canopy",
+      "raster_edit": {"cdsm_height_m": 3.5, "landcover": "unchanged"},
+      "albedo": 0.10,
+      "solar_transmission": 0.0,
+      "unit": "m2",
+      "cost_usd_per_unit": 450.0,
+      "cost_source": "Order-of-magnitude PV canopy installed cost; generates a co-benefit the scoring can credit.",
+      "lifetime_years": 25
+    }
+  },
+
+  "landcover_codes": {
+    "1": "paved",
+    "2": "building",
+    "3": "evergreen",
+    "4": "deciduous",
+    "5": "grass",
+    "6": "bare soil",
+    "7": "water"
+  }
+}
