@@ -137,6 +137,43 @@ co-benefits and cost efficiency. Each has a real dataset behind it:
 | Existing canopy / plantable space | BPRD trees (~150 k), land cover, canopy change 2014→2019→2024 | `data/canopy/` |
 | Cost efficiency | `config/interventions.json` | unit costs — **weakest link, see below** |
 
+### Population is residence, not footfall — and that was tested
+
+`population` is tract population apportioned onto pedestrian pixels: the tract's residents,
+scaled by how much of the tract lies in the AOI, spread evenly over its share of the
+sidewalk corridor. It answers *who lives with this heat*, not *who walks through it*, and
+`vulnerability` is constant within a tract, so the equity term can only respond to which
+tracts a policy treats, never to which streets within one.
+
+Weighting by actual pedestrian traffic instead would be better — if it existed. **Boston
+publishes no citywide pedestrian count.** The Transportation Department's turning-movement
+and pedestrian counts are real and extensive but exist only as scanned PDFs behind a
+document-search portal; the one open sensor dataset (Numina) is a three-location pilot.
+
+`scripts/footfall.py` therefore models trip generation — MBTA rail boardings, bus service
+from GTFS, Main Streets retail frontage, schools and colleges and libraries — each decayed
+over walking distance. Validated against the 6 900 pedestrian-involved Vision Zero crash
+records, the only citywide pedestrian signal available, over the cells inside a Boston tract:
+
+| weighting | Spearman ρ against pedestrian crash density |
+|---|---|
+| footfall index | 0.362 |
+| **residential density — what the scorer already uses** | **0.355** |
+| institutions alone | 0.313 |
+| retail alone | 0.227 |
+
+The same number. The index's deciles do run monotonically (0.02 → 1.59 crashes per cell)
+where residential density wobbles, but that is not enough to trade a stated assumption for
+an unstated model. **It is not wired into scoring**, and the component correlations
+(institutions 0.394 and retail 0.376 against bus service supply at 0.069) contradict the
+weights in `config/footfall.json` badly enough that they would have to be refit against the
+same crashes meant to validate them. Left unfitted on purpose.
+
+Two datasets would change this and both nearly exist: MBTA bus ridership by stop is
+published, but only as a web page with no machine-readable distribution, and the city's own
+pedestrian counts are already collected and merely not digitised. Rerun
+`python scripts/footfall.py --validate` before wiring anything in.
+
 The city heat rasters matter for a second reason: they are an *independent* check on
 SOLWEIG. If a policy improves Tmrt but the AOI's UHII and heat-event-hours context says it
 targeted an already-cool block, the auditor should catch that.

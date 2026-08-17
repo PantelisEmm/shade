@@ -1,0 +1,60 @@
+{
+  "description": "A relative pedestrian-activity surface, so relief can be weighted by how many people are actually on a street rather than only by how many live in the tract. THIS IS A PROXY, NOT A COUNT. Boston publishes no citywide pedestrian volume dataset: the Transportation Department's turning-movement and pedestrian counts exist only as scanned PDFs behind a document-search portal, and the one open sensor dataset is a three-location pilot. What is modelled here is trip generation -- transit, retail frontage and institutions -- decayed over walking distance. Read `validation` before using it for anything that matters.",
+  "sources": {
+    "rail": "MBTA Rail Ridership by Time Period, Season, Route/Line and Stop (MBTA Blue Book open data, item 9fea78625). Average weekday boardings and alightings per station. Latest season published is Fall 2019, i.e. pre-pandemic; ridership has not recovered evenly, so this over-weights the downtown stations relative to today.",
+    "bus": "MBTA GTFS (https://cdn.mbta.com/MBTA_GTFS.zip). Weekday trips serving each stop -- service intensity, not boardings. The MBTA publishes bus ridership by stop only as a web page with no machine-readable distribution, so supply stands in for demand.",
+    "retail": "Main Streets Districts 2019 (Analyze Boston / ArcGIS). Boston's own designation of neighbourhood commercial corridors.",
+    "institution": "Public schools (134), non-public schools (87), colleges and universities (60), public libraries and community centres, all Analyze Boston.",
+    "validation": "Vision Zero crash records (Analyze Boston), pedestrian-involved only -- 6,900 records. Pedestrian crash density is a standard proxy for pedestrian exposure in the safety literature and is the only citywide signal available to test this against."
+  },
+  "components": {
+    "transit_rail": {
+      "decay_m": 400.0,
+      "weight": 1.0
+    },
+    "transit_bus": {
+      "decay_m": 250.0,
+      "weight": 0.6
+    },
+    "retail": {
+      "decay_m": 150.0,
+      "weight": 0.8
+    },
+    "institution": {
+      "decay_m": 250.0,
+      "weight": 0.4
+    }
+  },
+  "normalisation": {
+    "percentile": 95,
+    "note": "Each component is divided by its own citywide 95th percentile, computed once when the derived cache is built and stored with it, so the components are comparable and an AOI's index sits on a stable citywide scale rather than being renormalised per AOI. The weights above are therefore readable as relative importance. Absolute scale does not affect the objective, which is a weighted mean and so is invariant to any positive rescaling; it affects only cross-AOI comparison of the index itself."
+  },
+  "scoring": {
+    "wired_into_scoring": false,
+    "note": "Not used by scripts/score_policy.py. Validated against pedestrian-involved Vision Zero crashes over the cells inside a Boston tract, this index scores rho 0.362 where the residential density the scorer already weights by scores 0.355 -- the same number. Weighting relief by this instead would trade a stated assumption for an unstated model at no measured gain. If bus ridership by stop or the city's own pedestrian counts become machine-readable, rerun python scripts/footfall.py --validate before wiring it in."
+  },
+  "caveats": [
+    "Rail ridership is Fall 2019. Nothing published since is stop-level.",
+    "Bus is service supply, not ridership: a frequent route through a quiet stop counts as much as a busy one.",
+    "The decay is Euclidean on the raster, not network distance. It leaks across a river or a rail cut where nobody can actually walk.",
+    "Every component is a weekday daytime generator. The scoring hour is a hot afternoon, which is roughly the right window, but nothing here is time-resolved.",
+    "The weights are judgement, not fitted. They were not tuned against the crash validation -- doing so would make the validation circular."
+  ],
+  "validation_result": {
+    "against": "6,900 pedestrian-involved Vision Zero crash records, 100 m grid",
+    "domain": "12,665 cells inside a Boston census tract",
+    "spearman_rho": {
+      "footfall_index": 0.362,
+      "residential_density": 0.355,
+      "institution_alone": 0.313,
+      "retail_alone": 0.227
+    },
+    "component_rho_citywide": {
+      "institution": 0.394,
+      "retail": 0.376,
+      "transit_rail": 0.229,
+      "transit_bus": 0.069
+    },
+    "reading": "The configured weights put transit first and institutions last; the evidence puts them the other way round, and the combined index scores below its two best components on the citywide domain. The weights were deliberately not refit -- tuning them against the crashes would leave nothing to validate against."
+  }
+}

@@ -63,6 +63,16 @@ get boston/sidewalk_inventory.geojson         "https://data.boston.gov/dataset/5
 # Parcels the city actually owns, so a plan that spends on private roofs is visible.
 get boston/city_land_audit.geojson            "https://data.boston.gov/dataset/3191edf4-eafb-420a-bf6c-0957d82cd942/resource/6c830e25-6bb6-4ed6-9675-ea38abec3d4a/download/city_land_audit_public.geojson"
 
+## --- pedestrian activity (scripts/footfall.py; NOT used by the scorer, see
+##     config/footfall.json -- kept as the evidence for the residence assumption) ---
+get boston/public_schools.geojson             "https://data.boston.gov/dataset/4df4b9c7-239d-4643-ac21-a22b42c832df/resource/fd47065d-7f9a-4564-8090-aa9166b1b944/download/public_schools.geojson"
+get boston/non_public_schools.geojson         "https://data.boston.gov/dataset/a8944f1a-aa6b-4d0c-8d68-e3b2338a9c34/resource/f6330a35-c451-4d10-90b7-7f038f355699/download/non_public_schools.geojson"
+get boston/colleges_and_universities.geojson  "https://data.boston.gov/dataset/7624a2d6-ca74-4fc1-9bba-d6e89d4ca9c7/resource/139b6ce0-ef39-48c7-aeb3-7b7f67b9d8af/download/colleges_and_universities.geojson"
+# Pedestrian-involved records are the only citywide pedestrian signal Boston publishes.
+get boston/vision_zero_crashes.csv            "https://data.boston.gov/dataset/7b29c1b2-7ec2-4023-8292-c24f5d8f0905/resource/e4bfe397-6bfc-49c5-9367-c879fac7401d/download/tmpo50ge3my.csv"
+get transit/mbta_gtfs.zip                     "https://cdn.mbta.com/MBTA_GTFS.zip"
+get transit/mbta_rail_ridership.csv           "https://mbta-massdot.opendata.arcgis.com/api/download/v1/items/9fea7862501f4c59ab2c001ad6ae19b0/csv?layers=0"
+
 ## --- tree growth (not a Boston layer) ---
 # USDA Forest Service Urban Tree Database, McPherson/van Doorn/Peper 2016
 # (RDS-2016-0005). Allometric equations by species and climate region; the NoEast

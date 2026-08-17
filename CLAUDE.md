@@ -222,6 +222,19 @@ they stand N years on, and adds `expected_relief_c` and `plan_survival` to the o
 `data/boston/derived/siting_layers.gpkg` is a generated cache, built on first use; without
 it every AOI would rescan a 70 MB GeoJSON.
 
+### Population is residence, and pedestrian traffic was tried
+
+`population` is tract population spread over the pedestrian corridor — a residence proxy,
+not footfall, and `vulnerability` is flat within a tract. Do not describe it as anything
+else in a writeup.
+
+`scripts/footfall.py` builds a pedestrian-activity proxy from transit, retail and
+institutions and **is deliberately not wired into scoring**: against pedestrian-involved
+Vision Zero crashes it scores ρ 0.362 where residential density scores 0.355. No measured
+gain, so the stated assumption wins over an unstated model. Boston publishes no citywide
+pedestrian count — its own counts are scanned PDFs. Rerun
+`python scripts/footfall.py --validate` before changing that decision.
+
 ### Config
 
 - `config/aois.json` — 20 AOIs, **15 `train` / 5 `held_out`**. Respect the split; do not
