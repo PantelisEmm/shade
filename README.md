@@ -24,6 +24,10 @@ scripts/
   bench_resolution.py           → cost vs pixel size, runs/bench_resolution.csv
   make_weather_scenarios.py     → EPW files per climate scenario
   smoke_test_solweig.py         end-to-end check
+  policy_api.py                 the contract a policy is written against
+  score_policy.py               audits and scores a policy → score.json
+policies/
+  baseline_policy.py            the seed policy the autoresearch loop evolves
 DATA_MANIFEST.md                full provenance, CRS/units notes, and caveats
 ```
 
@@ -74,6 +78,53 @@ Boston Logan TMYx weather. `DATA_MANIFEST.md` documents every layer — where it
 from, its native resolution and CRS, and the unit/vertical-datum gotchas that matter
 (notably: the Nearmap DSM contains no trees, so the canopy model is built from the 2024
 crown inventory instead).
+
+## Scoring a policy
+
+A **policy** is a Python module with one function, `plan(ctx, budget_usd)`, that
+returns the pixels it wants to intervene on. `scripts/policy_api.py` is the contract:
+it hands the policy every grid it may look at (land cover, terrain, canopy, the city
+heat model, population, vulnerability, and the masks that say where a person can
+actually stand) and prices what comes back against `config/interventions.json`.
+
+```bash
+python scripts/score_policy.py --aoi dudley_square --budget 500000
+python scripts/score_policy.py --policy policies/my_policy.py \
+    --aois train --scenarios baseline,warm_2c --budget 500000
+```
+
+`score_policy.py` audits the plan first — unknown action, out-of-bounds pixel, land
+cover the action is not allowed on, a pixel booked twice, an overspend, or a `plan()`
+that runs past `--plan-timeout`. Any of those and the policy is infeasible: nothing is
+simulated and `score.json` carries the violations instead of a score, in the words the
+next prompt needs. Otherwise it edits the raster stack, runs SOLWEIG on the untouched
+and the edited AOI, and writes the objective vector to `runs/score_<policy>_<stamp>/score.json`
+plus a row per run in `runs/score_log.csv`:
+
+| objective | meaning |
+| --- | --- |
+| `heat_relief_c` | population-weighted drop in daytime UTCI on pedestrian space |
+| `access_gain_pp` | share of exposed residents moved below the UTCI stress threshold |
+| `equity_ratio` | relief in the top citywide vulnerability quartile ÷ relief overall |
+| `cobenefit_greened_pct` | new green and canopy as a share of walkable ground |
+| `cost_efficiency_person_c_per_100k` | person·°C of relief bought per $100k |
+| `worst_aoi_*`, `worst_scenario_*` | the same relief where the policy holds up worst |
+| `tmrt_relief_c` | **diagnostic, not a score** — see below |
+
+Tmrt is reported next to UTCI because the two diverge exactly where the trap is.
+Raising pavement albedo cools the *surface* and reflects more shortwave onto the
+person standing on it: measured here, spending a $500k budget on the hottest paved
+pedestrian pixels of one AOI scored **−0.32 °C** UTCI and **−1.33 °C** Tmrt —
+it made things worse, twice.
+Shade is what moves perceived temperature. `score.json` also carries a
+`known_biases` list, and every run is reproducible from the `solution_<aoi>.npz`
+written beside it.
+
+Two caches make the loop affordable, and they follow the physics: sky-view factors and
+wall geometry live in `runs/_svf_cache/` per AOI, and the untouched AOI's SOLWEIG
+summary in `runs/_baseline_cache/` per weather window. A policy that only changes
+albedo or land cover reuses both and scores in seconds; one that plants trees or
+raises canopies has changed the shadow geometry and pays for a fresh `prepare`.
 
 ## Working together
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -228,7 +229,9 @@ def _tract_table():
     shares = np.stack(
         [np.clip(svi[c].astype(float).to_numpy() / denom, 0, 1) for c in SVI_SHARES]
     )
-    with np.errstate(invalid="ignore"):
+    # Tracts with no residents divide to all-NaN; they carry no weight anyway.
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         index = np.nanmean(shares, axis=0)
     index = np.where(np.isfinite(index), index, 0.0)
     rank = index.argsort().argsort()

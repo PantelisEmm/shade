@@ -26,6 +26,9 @@ python scripts/build_aoi.py --all                # all 20
 python scripts/summarise_aois.py                 # -> data/aoi/summary.csv (needs built AOIs)
 
 python scripts/smoke_test_solweig.py --aoi dudley_square   # end-to-end SOLWEIG check
+
+python scripts/score_policy.py --aoi dudley_square --budget 500000   # score one policy
+python scripts/score_policy.py --policy policies/my_policy.py     --aois train --scenarios baseline,warm_2c --budget 500000
 ```
 
 `build_aoi.py` also takes `--neighborhood <BPDA name>`, `--bbox MINX MINY MAXX MAXY`
@@ -49,6 +52,10 @@ make_weather_scenarios.py   → data/weather/scenarios/*.epw                   (
 build_aoi.py                → data/aoi/<name>/*.tif + aoi.json               (per-AOI stack)
 smoke_test_solweig.py       → runs/<run>/                                    (SOLWEIG outputs + cache)
 summarise_aois.py           → data/aoi/summary.csv                           (profiles all built AOIs)
+
+policies/*.py               → plan(ctx, budget_usd) -> list[Placement]       (what the LLM writes)
+policy_api.py               → PlanningContext, pricing, raster edits         (the contract)
+score_policy.py             → runs/score_<policy>_<stamp>/score.json         (the objective vector)
 ```
 
 `build_aoi.py` is where nearly all the domain logic lives. It pulls from live ArcGIS
@@ -115,6 +122,38 @@ DATA_MANIFEST.md section 8 has the full table.
 2 m is the resolution for search and final scoring alike; 1 m is a spot-check only.
 Coarsening biases mean Tmrt warm (47.8 °C at 1 m, 49.0 °C at 4 m), so policy-vs-policy
 comparison at a fixed resolution is sound while comparing across resolutions is not.
+
+### The scoring layer
+
+`policy_api.py` builds the `PlanningContext` a policy sees and applies its
+`Placement`s to the stack; `score_policy.py` audits, simulates, and scores. Nothing in
+`policy_api.py` imports solweig, so a policy can be written and checked without paying
+for a simulation.
+
+Three things about it that are not obvious from the code:
+
+- **Feasibility is settled before any simulation.** Unknown action, out-of-bounds
+  pixel, ineligible land cover, a pixel booked twice, an overspend, or a `plan()` that
+  runs past `--plan-timeout` and the whole policy is infeasible across every AOI:
+  `score.json` gets the violations and no SOLWEIG runs. The violation strings carry
+  counts and the offending land-cover codes because they are read by the next prompt,
+  not by a person.
+- **Per-pixel albedo is a monkeypatch, and it has to be.** SOLWEIG derives albedo and
+  emissivity from the land-cover grid whenever one is present, and code 2 is what marks
+  a pixel as a building -- recoding a cool roof to grass would drop the roof to ground
+  level in the ground-view-factor mask. `score_policy.py` patches
+  `SurfaceData.get_land_cover_properties` on the **class** (an instance-level patch is
+  lost when `calculate` copies the surface for tiling) and carries the values in
+  `self.albedo` / `self.emissivity`, which do survive the copy.
+- **The window, not the AOI.** `prepare` crops to the valid bounding box, so the
+  prepared surface can be smaller than the AOI grid. Every mask the objectives use is
+  sliced to that window, and the intervention run asserts it cropped to the same one --
+  otherwise the two runs are being differenced on different pixels.
+
+Scores are comparable only within one `--res`, `--date`, `--hours` and access threshold.
+UTCI is the score; Tmrt is reported alongside as a diagnostic, because a policy that
+buys albedo moves Tmrt hard in the *wrong* direction (more shortwave reflected onto the
+person) while barely touching perceived temperature.
 
 ### Config
 
