@@ -36,7 +36,7 @@ def main() -> None:
                     help="leave the GPU enabled. Off by default: an integrated GPU "
                          "reporting little VRAM caps SOLWEIG's tile side below the "
                          "shadow buffer, which collapses SVF tiling to one tile per "
-                         "pixel and never finishes. See DATA_MANIFEST.md section 8.")
+                         "pixel and never finishes. See DATA_MANIFEST.md section 9.")
     args = ap.parse_args()
 
     if not args.gpu:

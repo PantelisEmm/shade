@@ -15,9 +15,14 @@ The contract (see `scripts/policy_api.py` for the full context object):
     * A `Placement` is one action from `config/interventions.json` plus the
       pixels it lands on. Per-tree actions bill per placement; per-m2 actions
       bill per pixel.
-    * Spending more than `budget_usd`, or placing an action on land cover it is
-      not allowed on, makes the whole policy infeasible -- the auditor scores
-      nothing and reports the violation.
+    * Spending more than `budget_usd`, placing an action on land cover it is not
+      allowed on, or putting it somewhere it may not physically go, makes the
+      whole policy infeasible -- the auditor scores nothing and reports the
+      violation. `ctx.placeable(action)` is every pixel that passes both checks;
+      `ctx.plantable` and `ctx.buildable` are the same thing precomputed for a
+      tree and for a canopy. Land cover alone will not keep a tree out of the
+      road: code 1 is "paved" for the travel lane and the sidewalk alike, and it
+      is `ctx.roadbed` that tells them apart.
 
 The policy is scored on population-weighted UTCI relief, gain in access to
 relief, equity of that relief, co-benefits, and cost efficiency. Note the trap
@@ -118,9 +123,10 @@ def plan(ctx: PlanningContext, budget_usd: float) -> list[Placement]:
     placements: list[Placement] = []
     spent = 0.0
 
-    # 1. Trees, spaced, down the priority ranking. `plantable` is already
-    #    pedestrian ground with no canopy over it, so this never plants a tree
-    #    into an existing crown.
+    # 1. Trees, spaced, down the priority ranking. `plantable` has already had
+    #    the roadbed, the crosswalks, the hydrant and pole clearances and the
+    #    ground under an existing crown taken out of it, so every pixel here is
+    #    one the auditor will accept.
     tree_budget = budget_usd * SPLIT["tree_medium"]
     n_trees = min(
         ctx.affordable("tree_medium", tree_budget),
@@ -135,7 +141,9 @@ def plan(ctx: PlanningContext, budget_usd: float) -> list[Placement]:
     # 2. Canopies over the hottest pedestrian pixels the trees did not reach.
     #    Trees are the better buy per dollar of shade, so this only gets what is
     #    left -- including whatever the tree pass could not spend for want of
-    #    plantable ground.
+    #    plantable ground. `buildable` is wider than `plantable` (a canopy needs
+    #    no pit, so the setbacks do not apply) but narrower in the historic
+    #    districts, where an awning needs a Landmarks Commission hearing.
     remaining = budget_usd - spent
     covered = np.zeros(ctx.shape, dtype=bool)
     if rows.size:
@@ -143,7 +151,7 @@ def plan(ctx: PlanningContext, budget_usd: float) -> list[Placement]:
         for r, c in zip(rows, cols):
             covered[max(0, r - crown_px):r + crown_px + 1,
                     max(0, c - crown_px):c + crown_px + 1] = True
-    open_ground = ctx.exposure & (ctx.cdsm <= 0.0) & ~covered
+    open_ground = ctx.buildable & (ctx.cdsm <= 0.0) & ~covered
     n_canopy = min(ctx.affordable("shade_canopy", remaining), int(open_ground.sum()))
     crows, ccols = _top_pixels(score, open_ground, n_canopy)
     if crows.size:

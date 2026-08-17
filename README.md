@@ -70,7 +70,7 @@ resolution for search *and* final scoring: roughly 6× cheaper per SOLWEIG evalu
 1 m, while still resolving street canyons and crown-scale shade. Build at 1 m (`--res 1`)
 only to spot-check that a result is not an artefact of the grid — and never compare scores
 across resolutions, since coarsening biases mean Tmrt warm by about 1 °C.
-`DATA_MANIFEST.md` section 8 has the measured numbers, plus the integrated-GPU tiling trap
+`DATA_MANIFEST.md` section 9 has the measured numbers, plus the integrated-GPU tiling trap
 that makes `solweig.disable_gpu()` mandatory on a laptop.
 
 Sources are City of Boston Open Data, the Canopy Change Assessment, USGS 3DEP, and

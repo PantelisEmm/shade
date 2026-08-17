@@ -7,7 +7,7 @@ metres) so SOLWEIG's shadow geometry is in metres.
 The default resolution is 2 m, used for both search and final scoring: about 6x
 cheaper per SOLWEIG evaluation than 1 m while still resolving street canyons and
 crown-scale shade. Build at 1 m with --res 1 only to spot-check that a result is
-not an artefact of the grid. See DATA_MANIFEST.md section 8.
+not an artefact of the grid. See DATA_MANIFEST.md section 9.
 
     python scripts/build_aoi.py --aoi nubian_square      # 2 m (default)
     python scripts/build_aoi.py --aoi nubian_square --res 1

@@ -1,0 +1,119 @@
+{
+  "description": "Where an intervention is allowed to physically go, as opposed to what land cover it applies to. config/interventions.json says a tree may sit on any ground pixel; this file says that ground pixel may not be the travel lane, a crosswalk, within 10 ft of a hydrant, or inside a historic district when the action is a roof or an awning. scripts/siting.py turns these rules into masks on the AOI grid and scripts/score_policy.py refuses a solution that breaks them.",
+  "sources": {
+    "pedestrian_space": "City of Boston Sidewalk Centerline (Analyze Boston, dataset 67e1944c). TYPE codes: SWALK-CL sidewalk, PWALK-CL pedestrian walkway, CWALK-CL marked crossing, CWALK-CL-UM unmarked crossing.",
+    "setbacks": "City of Boston, 'How to request to have a tree planted on a City street' -- 10 ft from light poles, driveways and hydrants; 10-20 ft from intersections depending on traffic direction. https://www.boston.gov/departments/parks-and-recreation/how-request-have-tree-planted-city-street",
+    "sidewalk_width": "Measured: City of Boston Sidewalk Inventory (Analyze Boston, dataset 57b57bc6), Public Works survey completed 2014, SWK_WIDTH in feet on 24,728 sidewalk polygons (median 7 ft; 18 % under the 6 ft planting threshold). Threshold: City of Boston sidewalk policy (Public Works, rev. Jan 2014) and the 4x6 ft tree pit standard drawing S.5 -- planting requires a 6 ft sidewalk excluding the curb, a 5 ft clear path of travel, and a pit of at least 24 sq ft.",
+    "design_review": "Boston Landmarks Commission historic districts (Analyze Boston, dataset a30e72b5). Exterior alterations visible from a public way -- roofs, awnings and canopies among them -- require commission approval.",
+    "hydrants": "Boston Water and Sewer Commission fire hydrants (Analyze Boston, dataset 1f43041c).",
+    "streetlights": "Streetlight Locations (Analyze Boston, dataset 52b0fdad). A legacy layer, last refreshed 2019; treat it as an approximate pole inventory.",
+    "ownership": "City Land Audit (Public) (Analyze Boston, dataset 3191edf4): 2,940 parcels the City of Boston owns, with the department in care and custody."
+  },
+  "pedestrian_space": {
+    "walkway_types": [
+      "SWALK-CL",
+      "PWALK-CL"
+    ],
+    "crossing_types": [
+      "CWALK-CL",
+      "CWALK-CL-UM"
+    ],
+    "walkway_half_width_m": 3.0,
+    "crossing_half_width_m": 2.5,
+    "note": "The sidewalk layer is a centreline with no width attribute, so the pedestrian corridor is a fixed buffer either side of it. 3 m is generous for a Boston sidewalk and deliberately so: the buffer sets where relief is measured, and a corridor that is too narrow would drop pedestrians out of the denominator entirely."
+  },
+  "planting": {
+    "setback_hydrant_m": 3.05,
+    "setback_streetlight_m": 3.05,
+    "setback_intersection_m": 6.1,
+    "min_sidewalk_width_m": 1.8288,
+    "clear_path_m": 1.52,
+    "min_pit_area_m2": 2.23,
+    "note": "Setbacks are the 10 ft rule; the intersection setback takes the conservative end of the city's 10-20 ft range. min_sidewalk_width_m is 6 ft exactly, not 1.83: 6.0 ft is the modal width in the survey (3,930 polygons, 16.7 %), and a threshold rounded up to 1.83 m calls every one of them narrow, taking the rule from 18 % of surveyed sidewalk to 35 %. width_tolerance_m keeps float noise off that boundary. The rule is enforced wherever the 2014 sidewalk inventory measured a width and nowhere else -- an unsurveyed pixel is unknown, and unknown must not forbid a tree. clear_path_m and min_pit_area_m2 are still not enforced: the inventory gives a width per polygon, not the position of the pit within it.",
+    "width_tolerance_m": 1e-06,
+    "impute_width": true,
+    "impute_max_distance_m": 25.0,
+    "enforce_imputed_width": true,
+    "imputation_validation": "20 % hold-out over the 23,516 surveyed polygons, nearest-neighbour by representative point (scripts/siting.py --validate-width). Against the trivial 'assume wide enough' baseline at 81.6 % accuracy and no forbids: k=1 nearest reaches 85.8 % overall, but the useful figure is by distance. Within 25 m it is 90.3 % accurate and wrongly forbids 5.6 % of compliant sidewalk; at 25-50 m 81.2 % and 11.8 %; beyond 50 m 77.6 %, which is worse than assuming wide. Hence the 25 m cap. Taking k=3 or k=5 medians did not help: they trade recall for precision without moving accuracy. Within the cap the error is asymmetric in the useful direction -- a wrongly forbidden pixel costs a planting site out of many, while a wrongly permitted one is a plan that cannot be built -- so imputed width is allowed to forbid, and every violation says how many of its pixels were inferred rather than surveyed."
+  },
+  "review": {
+    "design_review_district_types": [
+      "LHD",
+      "ACD",
+      "Landmark District"
+    ],
+    "note": "Protection areas (TYPE 'PA') are demolition-delay and advisory rather than design review, so they are not treated as an exclusion."
+  },
+  "action_rules": {
+    "tree_small": {
+      "require": [
+        "pedestrian"
+      ],
+      "forbid": [
+        "roadbed",
+        "crossing",
+        "narrow_sidewalk",
+        "near_obstruction",
+        "existing_canopy"
+      ]
+    },
+    "tree_medium": {
+      "require": [
+        "pedestrian"
+      ],
+      "forbid": [
+        "roadbed",
+        "crossing",
+        "narrow_sidewalk",
+        "near_obstruction",
+        "existing_canopy"
+      ]
+    },
+    "shade_canopy": {
+      "require": [
+        "pedestrian"
+      ],
+      "forbid": [
+        "roadbed",
+        "crossing",
+        "design_review"
+      ]
+    },
+    "solar_canopy": {
+      "require": [
+        "pedestrian"
+      ],
+      "forbid": [
+        "roadbed",
+        "crossing",
+        "design_review"
+      ]
+    },
+    "cool_roof": {
+      "forbid": [
+        "design_review"
+      ]
+    },
+    "green_roof": {
+      "forbid": [
+        "design_review"
+      ]
+    },
+    "grass_conversion": {
+      "forbid": [
+        "roadbed",
+        "crossing"
+      ]
+    },
+    "light_road": {}
+  },
+  "not_modelled": [
+    "Clear path of travel and tree pit area. The sidewalk inventory gives one width per polygon, so the 6 ft width rule is testable but the 5 ft clear path and the 24 sq ft pit -- both about where the pit sits within that width -- are not. A 24 sq ft pit is also larger than a 1 m pixel and smaller than a 2 m one, so it is not expressible as a pixel test at either resolution.",
+    "Sidewalk width outside the surveyed area. The inventory is a 2014 survey and does not cover every walkway; `measured_width_coverage_of_walkway` in score.json says how much of each AOI it reached. Off the survey, `sidewalk_width_m` falls back to the thickness of the surrounding non-roadbed ground, which over-estimates where a front yard or a plaza adjoins, and forbids nothing.",
+    "Driveways and curb cuts. The 10 ft setback applies to them and no city layer of them was found; the sidewalk inventory's curb_type records the kerb material, not aprons.",
+    "Underground utilities (Dig Safe, BWSC water and sewer) and overhead wires. These decide a large share of real pits, and nothing here sees them. In particular no policy has any modelled reason to prefer tree_small over tree_medium, which in the field is usually a wires decision.",
+    "Ownership is reported, not enforced. `city_owned` marks the 2,940 parcels the city actually holds, and score.json records what share of each plan lands on them. A cool roof on a private building is a subsidy rather than a placement, so forbidding it would be wrong -- but a plan that spends its whole budget on private roofs should be read knowing that.",
+    "Permitting. Anything in the public way needs a Public Improvement Commission grant, and a public shade tree cannot be removed without a MGL c.87 hearing. Neither is a spatial constraint and neither is modelled.",
+    "Tree establishment, growth and mortality are modelled but not by default: pass --horizon-years to scripts/score_policy.py. See config/lifecycle.json."
+  ]
+}

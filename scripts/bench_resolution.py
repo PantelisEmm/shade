@@ -26,7 +26,7 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 import numpy as np
 import solweig
 
-solweig.disable_gpu()  # before any tiling call — see DATA_MANIFEST.md section 8
+solweig.disable_gpu()  # before any tiling call — see DATA_MANIFEST.md section 9
 ROOT = Path(__file__).resolve().parents[1]
 
 

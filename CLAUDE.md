@@ -26,9 +26,13 @@ python scripts/build_aoi.py --all                # all 20
 python scripts/summarise_aois.py                 # -> data/aoi/summary.csv (needs built AOIs)
 
 python scripts/smoke_test_solweig.py --aoi dudley_square   # end-to-end SOLWEIG check
+python scripts/siting.py --rebuild               # rebuild the derived siting layers
+python scripts/build_growth_curve.py --show      # Boston age-to-size curve for a street tree
+python scripts/lifecycle.py                      # what each action is at each age
 
 python scripts/score_policy.py --aoi dudley_square --budget 500000   # score one policy
 python scripts/score_policy.py --policy policies/my_policy.py     --aois train --scenarios baseline,warm_2c --budget 500000
+python scripts/score_policy.py --aoi dudley_square --horizon-years 10  # the trees as they are in year 10
 ```
 
 `build_aoi.py` also takes `--neighborhood <BPDA name>`, `--bbox MINX MINY MAXX MAXY`
@@ -53,6 +57,9 @@ build_aoi.py                → data/aoi/<name>/*.tif + aoi.json               (
 smoke_test_solweig.py       → runs/<run>/                                    (SOLWEIG outputs + cache)
 summarise_aois.py           → data/aoi/summary.csv                           (profiles all built AOIs)
 
+siting.py                   → data/boston/derived/siting_layers.gpkg        (where an action may go)
+build_growth_curve.py       → data/canopy/derived/boston_growth_curve.json  (how fast a tree grows)
+lifecycle.py                → growth, service life, mortality              (what an action is in year N)
 policies/*.py               → plan(ctx, budget_usd) -> list[Placement]       (what the LLM writes)
 policy_api.py               → PlanningContext, pricing, raster edits         (the contract)
 score_policy.py             → runs/score_<policy>_<stamp>/score.json         (the objective vector)
@@ -117,7 +124,7 @@ tiling to one tile per pixel — the run then never finishes. Measured cost on a
 GPU disabled: `prepare` 21 s and 2.1 s/timestep at 2 m, versus 129 s and 12.0 s/timestep
 at 1 m. Halving the pixel size is **not** a flat 4×: it is ~2.3× from 4→2 m and ~6× from
 2→1 m, because shadow casting adds a third `1/res` factor on top of the pixel count.
-DATA_MANIFEST.md section 8 has the full table.
+DATA_MANIFEST.md section 9 has the full table.
 
 2 m is the resolution for search and final scoring alike; 1 m is a spot-check only.
 Coarsening biases mean Tmrt warm (47.8 °C at 1 m, 49.0 °C at 4 m), so policy-vs-policy
@@ -155,6 +162,66 @@ UTCI is the score; Tmrt is reported alongside as a diagnostic, because a policy 
 buys albedo moves Tmrt hard in the *wrong* direction (more shortwave reflected onto the
 person) while barely touching perceived temperature.
 
+### Siting: land cover says what, siting says where
+
+Land cover cannot keep a tree out of the road. Code 1 is **paved** for the travel lane, the
+sidewalk, a plaza and a parking lot alike, so a policy ranking hot paved pixels near a
+street centreline ranks the carriageway first. `scripts/siting.py` fixes that from the
+city's own layers, and `score_policy.audit()` enforces the result before any simulation.
+
+- **Roadbed is a nearest-centreline split**, not a width. Boston's sidewalk layer is a
+  centreline with no width attribute, so every ground pixel goes to whichever centreline is
+  nearer — SAM street or sidewalk — and paved pixels on the street side are `roadbed`.
+- **`exposure` is now the sidewalk corridor plus crosswalks**, not an 8 m buffer around
+  street centrelines. It is where every population-weighted objective is measured, so
+  scores from before this are not comparable with scores after.
+- **A policy should place from `ctx.placeable(action)`**, or from `ctx.plantable` /
+  `ctx.buildable`, which are the same thing precomputed for a tree and a canopy. The
+  violation string names the rule and the count when it does not.
+- **The masks are metric and read the AOI's `res_m`**, so the same rule holds at 1 m and
+  2 m. Mask shares on `dudley_square` move by ~1 pp between the two.
+- **Sidewalk width is surveyed, then imputed, then given up on.** The 2014 inventory
+  measures `SWK_WIDTH` on 23 516 polygons; an unsurveyed walkway pixel takes the nearest
+  surveyed width **within 25 m**, and past that stays unjudged. The cap comes from a
+  hold-out test (`python scripts/siting.py --validate-width`): inside 25 m the imputation is
+  90 % accurate on the 6 ft rule against an 81.6 % "assume wide enough" baseline; past 50 m
+  it is *worse* than that baseline. Do not raise the cap without rerunning that test.
+- **The threshold is 6 ft exactly (1.8288 m), not 1.83.** 6.0 ft is the modal surveyed width
+  — 3 930 polygons sit exactly on the standard — so rounding the threshold up condemns all
+  of them and doubles the rule's bite. `width_tolerance_m` guards the boundary.
+- **Ownership is reported and never enforced.** `ctx.city_owned` marks the 2 940 parcels
+  the city holds. A cool roof on a private building is a subsidy, not an illegal placement,
+  so forbidding it would be wrong; `score.json` records the share instead.
+- **What is deliberately not enforced** — clear path, pit area, driveways, buried utilities,
+  overhead wires, permitting — is listed in `config/siting.json` under `not_modelled` and
+  copied into every `score.json`. Do not quietly start enforcing one of these without the
+  data to back it.
+- **Inferred evidence is labelled.** A violation citing `narrow_sidewalk` also reports how
+  many of its pixels rested on an imputed width. If you add another inferred rule, register
+  it in `SitingMasks.INFERRED` so it gets the same treatment.
+
+### Establishment: what an intervention is in year N
+
+Without `--horizon-years`, a planted tree has its configured 2.5 m crown on day one and
+never dies, which flatters shade against albedo. `--horizon-years N` simulates the assets as
+they stand N years on, and adds `expected_relief_c` and `plan_survival` to the objectives.
+
+- **Growth is geometry and gets simulated; survival is not.** A tree is repainted at the
+  crown the Boston curve gives it at that age and SOLWEIG runs on that. Mortality is applied
+  as a reported multiplier — half a tree cannot be planted, and thinning at random would
+  make the score depend on a seed.
+- **The curve is real data**, not a guess: USDA Urban Tree Database allometry for the
+  northeast, weighted by the species mix in Boston's own street tree inventory (86.7 %
+  matched). `python scripts/build_growth_curve.py --show` prints it.
+- **The default is unchanged.** `default_horizon_years` is null in `config/lifecycle.json`,
+  so a run without the flag scores exactly what it scored before.
+- **`known_tensions` in `config/lifecycle.json` is not decoration.** The configured 2.5 m
+  crown and 5 m height are trees of different ages; the configured 40-year life sits against
+  a literature mean of 19–28 years. Read it before changing either config.
+
+`data/boston/derived/siting_layers.gpkg` is a generated cache, built on first use; without
+it every AOI would rescan a 70 MB GeoJSON.
+
 ### Config
 
 - `config/aois.json` — 20 AOIs, **15 `train` / 5 `held_out`**. Respect the split; do not
@@ -163,6 +230,11 @@ person) while barely touching perceived temperature.
   Appendix A to Boston's own heat study, so policies are scored against the city's
   assumptions. **Unit costs are not Boston figures** — order-of-magnitude numbers from
   other cities, the weakest link in the stack, flagged in the JSON's `cost_caveat`.
+- `config/siting.json` — where each action may physically go, one rule set per action, each
+  rule cited to the city document it comes from. Mask names in `action_rules` must match
+  `MASK_NAMES` in `scripts/siting.py`; an action with no entry gets no siting constraint.
+- `config/lifecycle.json` — growth, service life and mortality per action, plus
+  `known_tensions` recording where it disagrees with `interventions.json`.
 
 Note the pattern in the city's own numbers: albedo changes move *surface* temperature a lot
 and *perceived* temperature barely; shade moves perceived temperature. A result that chases

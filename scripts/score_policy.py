@@ -22,6 +22,12 @@ The objective vector, all "higher is better":
     worst_aoi_*          the same relief at the AOI that gained least
     worst_scenario_*     ... and at the climate scenario that held up worst
 
+`--horizon-years N` simulates the assets as they stand N years after the build
+rather than the finished asset: a tree gets the crown the Boston growth curve
+gives it at that age, and anything past its service life is not there. That adds
+`expected_relief_c` -- the same relief with expected tree mortality applied --
+and `plan_survival`, the share of the plan's shade still standing.
+
 plus `tmrt_relief_c` as a *diagnostic*, not a score. Tmrt and UTCI diverge exactly
 where the albedo trap lives: reflective pavement moves surface temperature and
 barely moves what a person feels. Reporting both makes a policy that chases the
@@ -39,6 +45,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import math
 import importlib.util
 import json
 import os
@@ -67,6 +74,8 @@ SCRIPTS = Path(__file__).resolve().parent
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import lifecycle
+import siting
 import solweig
 from policy_api import (
     AppliedStack,
@@ -108,6 +117,18 @@ KNOWN_BIASES = [
     "access_gain_pp is measured against a fixed UTCI threshold, so it saturates in the "
     "warmer scenarios: when almost nobody can be moved below it, the objective goes "
     "quiet even though the relief is real. Read it next to unshaded_pct_before.",
+    "Without --horizon-years, a planted tree delivers its configured 2.5 m crown on the "
+    "day it goes in and never dies. That flatters shade against albedo, which is at full "
+    "strength immediately. The lifecycle block reports what the tree actually is at each "
+    "age even when the horizon is not set.",
+    "expected_relief_c applies expected mortality as a linear multiplier on simulated "
+    "relief, weighted by the shade area each action casts. It is not a second simulation: "
+    "the trees that die are not the ones the geometry would have lost.",
+    "Pedestrian space is a fixed buffer either side of the city's sidewalk centrelines, "
+    "which carry no width attribute, minus the travel lane. It is where relief is "
+    "measured, so it sets the denominator of every population-weighted objective. "
+    "Scores from before the siting rules landed used an 8 m buffer around street "
+    "centrelines instead and are not comparable with these.",
 ]
 
 
@@ -247,6 +268,19 @@ def audit(ctx: PlanningContext, placements, budget_usd: float) -> tuple[list[str
                 f"but the action applies to {allowed}"
             )
 
+        # Siting: the pixel's land cover may be right and the place still wrong.
+        n_sited, by_rule = ctx.siting_failures(p.action, p.rows, p.cols)
+        if n_sited:
+            detail = ", ".join(
+                f"{rule} {count}" for rule, count in
+                sorted(by_rule.items(), key=lambda kv: -kv[1])
+            )
+            problems.append(
+                f"{p.action}: {n_sited} of {len(p)} pixels break a siting rule "
+                f"({detail}); place only where ctx.placeable({p.action!r}) is True. "
+                f"config/siting.json says what each rule is and where it comes from"
+            )
+
         flat = p.rows.astype(np.int64) * cols_n + p.cols.astype(np.int64)
         repeats = len(flat) - len(np.unique(flat))
         if repeats:
@@ -272,6 +306,52 @@ def audit(ctx: PlanningContext, placements, budget_usd: float) -> tuple[list[str
         "share_of_budget": round(total / budget_usd, 4) if budget_usd > 0 else None,
     }
     return problems, spend
+
+
+# --------------------------------------------------------------------------- #
+# The horizon: what is standing some years after the build
+# --------------------------------------------------------------------------- #
+def apply_horizon(ctx: PlanningContext, lc, placements, years: float):
+    """Swap the intervention menu for the assets as they stand at `years`.
+
+    Growth is a geometry change, so a tree is repainted at the crown the Boston
+    growth curve gives it at that age and SOLWEIG simulates that. An asset past
+    its service life is simply absent. Nothing here touches price: the budget
+    went out of the door at year zero whatever has happened since.
+
+    Survival is deliberately *not* applied to the geometry -- half a tree cannot
+    be planted, and thinning the plan at random would make the score depend on a
+    seed. It is reported next to the relief instead, via `plan_survival`.
+    """
+    menu, notes = lc.horizon_menu(ctx.interventions, years)
+    ctx.interventions = menu
+    kept = [p for p in placements if notes.get(p.action, {}).get("alive", True)]
+    dropped = {
+        p.action: len(p) for p in placements
+        if not notes.get(p.action, {}).get("alive", True)
+    }
+    return kept, notes, dropped
+
+
+def shade_area_by_action(ctx: PlanningContext, placements) -> dict:
+    """Ground each action shades at the horizon, m2, for weighting survival.
+
+    Crowns are discs of the horizon radius and built canopies are one pixel
+    each; an albedo action casts no shade and is left out, which is the point --
+    it should not dilute the survival of a plan's actual shade.
+    """
+    out: dict[str, float] = {}
+    for p in placements:
+        edit = ctx.spec(p.action).get("raster_edit", {})
+        radius = edit.get("crown_radius_m")
+        if radius:
+            area = math.pi * float(radius) ** 2 * len(p)
+        elif edit.get("cdsm_height_m"):
+            area = ctx.pixel_area_m2 * len(p)
+        else:
+            continue
+        out[p.action] = out.get(p.action, 0.0) + area
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -584,6 +664,8 @@ def aggregate(runs: list[dict]) -> dict:
         "worst_scenario_heat_relief_c": worst_scen[0],
         "worst_scenario": worst_scen[1],
         "tmrt_relief_c": mean_of("tmrt_relief_c", runs),
+        "expected_relief_c": mean_of("expected_relief_c", runs),
+        "plan_survival": mean_of("plan_survival", runs),
         "pv_mwh_per_yr": _round(
             sum(rows[0]["metrics"]["pv_mwh_per_yr"] or 0.0 for rows in by_aoi.values()), 1
         ),
@@ -663,6 +745,12 @@ def main() -> None:
     ap.add_argument("--date", default="07-27", help="MM-DD to simulate")
     ap.add_argument("--hours", default="10,13,16")
     ap.add_argument("--access-threshold", type=float, default=ACCESS_THRESHOLD_C)
+    ap.add_argument("--horizon-years", type=float, default=lifecycle.default_horizon(),
+                    help="simulate the assets as they stand this many years after "
+                         "the build: trees at the crown the Boston growth curve "
+                         "gives them, anything past its service life absent. "
+                         "Omitted, the finished asset in config/interventions.json "
+                         "is simulated, which is what every earlier score assumed.")
     ap.add_argument("--plan-timeout", type=float, default=120.0,
                     help="seconds a policy may spend deciding, per AOI")
     ap.add_argument("--out", help="run directory (default runs/score_<policy>_<stamp>)")
@@ -671,7 +759,7 @@ def main() -> None:
     ap.add_argument("--gpu", action="store_true",
                     help="leave the GPU enabled. Off by default: an integrated GPU "
                          "reporting little VRAM collapses SVF tiling and never "
-                         "finishes. See DATA_MANIFEST.md section 8.")
+                         "finishes. See DATA_MANIFEST.md section 9.")
     args = ap.parse_args()
 
     if not args.gpu:
@@ -704,9 +792,29 @@ def main() -> None:
             "date": args.date,
             "hours": hours,
             "access_threshold_c": args.access_threshold,
+            "horizon_years": args.horizon_years,
             "output_dir": str(out_root),
         },
         "known_biases": KNOWN_BIASES,
+        # What the siting rules did on each AOI, and what they still cannot see.
+        # A rule whose layer is missing shows up as available=False and forbids
+        # nothing, so a run on a partial checkout is loose rather than wrong.
+        # Growth, service life and mortality. Present whatever the horizon, so a
+        # run that simulates the finished asset still reports what that asset is
+        # not: a tree on the day it is planted.
+        "lifecycle": {
+            "rules": "config/lifecycle.json",
+            "growth_curve": "data/canopy/derived/boston_growth_curve.json",
+            "horizon_years": args.horizon_years,
+            "known_tensions": lifecycle.load().rules.get("known_tensions", []),
+            "per_action": {},
+            "per_aoi": {},
+        },
+        "siting": {
+            "rules": "config/siting.json",
+            "not_modelled": siting.load_rules()["not_modelled"],
+            "per_aoi": {},
+        },
     }
 
     # -- Phase 1: plan and audit every AOI before spending a second on SOLWEIG - #
@@ -719,6 +827,8 @@ def main() -> None:
     for name in names:
         aoi_dir = aoi_path(name, args.res)
         ctx = load_context(aoi_dir)
+        if ctx.siting is not None:
+            report["siting"]["per_aoi"][name] = ctx.siting.summary()
         try:
             raw, elapsed = call_plan(policy, ctx, args.budget, args.plan_timeout)
             placements = normalise_placements(raw)
@@ -732,6 +842,17 @@ def main() -> None:
         problems, spend = audit(ctx, placements, args.budget)
         if problems:
             violations[name] = problems
+        elif ctx.siting is not None and ctx.siting.available.get("city_owned"):
+            # Not a rule -- see not_modelled in config/siting.json. A plan may
+            # legitimately target private roofs, as a subsidy would; it should
+            # just be visible that it did.
+            placed = sum(len(p) for p in placements)
+            on_city = sum(int(ctx.city_owned[p.rows, p.cols].sum()) for p in placements)
+            report["siting"]["per_aoi"][name]["placements_on_city_land"] = {
+                "pixels": on_city,
+                "of_total": placed,
+                "share": round(on_city / placed, 4) if placed else None,
+            }
         plans[name] = {
             "split": ctx.split,
             "spend": spend,
@@ -762,11 +883,28 @@ def main() -> None:
         return
 
     # -- Phase 2: simulate -------------------------------------------------- #
+    lc = lifecycle.load()
     runs: list[dict] = []
     for name in names:
         aoi_dir = aoi_path(name, args.res)
         ctx = load_context(aoi_dir)
         placements = normalise_placements(plans[name]["placements"])
+        survival = None
+        if args.horizon_years is not None:
+            placements, notes, dropped = apply_horizon(ctx, lc, placements, args.horizon_years)
+            survival = lc.plan_survival(shade_area_by_action(ctx, placements),
+                                        args.horizon_years)
+            report["lifecycle"]["per_action"] = {
+                a: n for a, n in notes.items() if a in plans[name]["spend"]["by_action_units"]
+            }
+            report["lifecycle"]["per_aoi"][name] = {
+                "plan_survival": survival,
+                "placements_past_service_life": dropped,
+            }
+            if dropped:
+                gone = ", ".join(f"{a} x{n}" for a, n in dropped.items())
+                print(f"  {name}: past service life at year "
+                      f"{args.horizon_years:g}, not simulated -- {gone}")
         applied = apply_placements(ctx, placements)
         spend = plans[name]["spend"]
 
@@ -797,6 +935,15 @@ def main() -> None:
             seconds = time.time() - t0
 
             metrics = objectives(ctx, win, base, interv, applied, spend, args.access_threshold)
+            if survival is not None:
+                # Simulated relief assumes every tree lived. This is the same
+                # relief with the expected attrition applied -- a linear
+                # weighting, not a second simulation.
+                metrics["plan_survival"] = survival
+                metrics["expected_relief_c"] = (
+                    _round(metrics["heat_relief_c"] * survival)
+                    if metrics["heat_relief_c"] is not None else None
+                )
             runs.append({
                 "aoi": name,
                 "split": ctx.split,
@@ -835,11 +982,13 @@ def main() -> None:
 
     obj = report["objectives"]
     print("\nobjectives")
-    for key in ("heat_relief_c", "access_gain_pp", "equity_ratio",
+    for key in ("heat_relief_c", "expected_relief_c", "plan_survival",
+                "access_gain_pp", "equity_ratio",
                 "cobenefit_greened_pct", "cost_efficiency_person_c_per_100k",
                 "worst_aoi_heat_relief_c", "worst_scenario_heat_relief_c",
                 "tmrt_relief_c"):
-        print(f"  {key:36s} {obj[key]}")
+        if obj.get(key) is not None:
+            print(f"  {key:36s} {obj[key]}")
     print(f"\n-> {out_root / 'score.json'}")
     print(f"-> {SCORE_LOG}")
 

@@ -15,6 +15,14 @@ eligibility rules, edits the raster stack, and runs SOLWEIG.
 Nothing here imports solweig, so a policy can be written and checked without
 paying for a simulation.
 
+Two independent gates decide whether a pixel may be used. `eligible(action)`
+is land cover -- a cool roof needs a building under it. `sitable(action)` is
+physical siting -- a tree may not go in the travel lane, on a crosswalk, inside
+a hydrant's clearance, or under a crown that is already there, and a roof or an
+awning may not go inside a Boston Landmarks Commission district. The rules and
+their sources are in `config/siting.json`, the masks in `scripts/siting.py`, and
+`placeable(action)` is both gates at once.
+
 Units, once, so a policy never has to guess:
     * every grid is metres or degC; the heat rasters were converted on build
     * `population` is people per pixel, `vulnerability` is a 0-1 percentile
@@ -43,6 +51,12 @@ import rasterio
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
 
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+import siting
+
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 CONFIG = ROOT / "config"
@@ -57,8 +71,6 @@ GROUND_CODES = (PAVED, EVERGREEN, DECIDUOUS, GRASS, BARE)
 # composite vulnerability index averages, each as a share of tract population.
 SVI = DATA / "heat" / "climate_ready_social_vulnerability.geojson"
 SVI_SHARES = ["OlderAdult", "TotChild", "POC2", "LEP", "Low_to_No", "TotDis"]
-
-STREETS = DATA / "boston" / "street_segments_sam.geojson"
 
 # Co-benefit conversion factor. An order-of-magnitude figure, the same weak link
 # as the unit costs in config/interventions.json: ~1400 kWh/m2/yr of horizontal
@@ -155,11 +167,19 @@ class PlanningContext:
     priority: np.ndarray         # bool: tract in the citywide top vulnerability quartile
 
     walkable: np.ndarray         # bool: ground a person can stand on
-    near_street: np.ndarray      # bool: within pedestrian_buffer_m of a centreline
-    exposure: np.ndarray         # bool: walkable & near_street -- where scores are measured
-    plantable: np.ndarray        # bool: exposure ground with no existing canopy
+    walkway: np.ndarray          # bool: sidewalk / path corridor, roadbed removed
+    crossing: np.ndarray         # bool: marked or unmarked crosswalk
+    roadbed: np.ndarray          # bool: paved travel way -- nothing may be built here
+    design_review: np.ndarray    # bool: inside a Landmarks Commission district
+    city_owned: np.ndarray       # bool: on a parcel the city owns (reported, never a rule)
+    exposure: np.ndarray         # bool: walkway | crossing -- where scores are measured
+    plantable: np.ndarray        # bool: every siting rule for a tree is satisfied
+    buildable: np.ndarray        # bool: every siting rule for a canopy is satisfied
+    sidewalk_width_m: np.ndarray # sidewalk width m: surveyed where the city measured it,
+                                 # else a corridor-thickness proxy; NaN off the walkway
 
     interventions: dict = field(repr=False, default_factory=dict)
+    siting: "siting.SitingMasks | None" = field(repr=False, default=None)
 
     # -- prices ------------------------------------------------------------- #
     @property
@@ -193,12 +213,56 @@ class PlanningContext:
 
         Actions without `applies_to_landcover` (trees, canopies) are allowed on
         any ground pixel; the auditor still rejects placements on buildings and
-        water.
+        water. This is land cover only -- see `sitable` for where the pixel is
+        allowed to be.
         """
         codes = self.spec(action).get("applies_to_landcover")
         if codes:
             return np.isin(self.landcover, list(codes))
         return np.isin(self.landcover, list(GROUND_CODES))
+
+    def sitable(self, action: str) -> np.ndarray:
+        """Pixels where `action` breaks no rule in `config/siting.json`.
+
+        Land cover says a tree may go on any ground pixel; this says that pixel
+        may not be the travel lane, a crosswalk, a hydrant's clearance or ground
+        already under a crown. The two are independent, so a placement has to
+        satisfy both.
+        """
+        if self.siting is None:
+            return np.ones(self.shape, dtype=bool)
+        return self.siting.allowed(action)
+
+    def placeable(self, action: str) -> np.ndarray:
+        """`eligible & sitable` -- everywhere the auditor will accept."""
+        return self.eligible(action) & self.sitable(action)
+
+    def siting_failures(self, action: str, rows, cols) -> tuple[int, dict]:
+        """(pixels breaking at least one siting rule, {rule: pixels}).
+
+        Broken out per rule so the violation string names what to fix -- a plan
+        rejected for the roadbed needs a different repair from one rejected for
+        a hydrant clearance.
+        """
+        if self.siting is None:
+            return 0, {}
+        bad = np.zeros(np.asarray(rows).shape, dtype=bool)
+        by_rule: dict[str, int] = {}
+        for name, want in self.siting.rule_terms(action):
+            hit = self.siting[name][rows, cols]
+            fails = ~hit if want else hit
+            if fails.any():
+                by_rule[name] = int(fails.sum())
+                # Some evidence is inferred rather than observed -- a sidewalk
+                # width imputed from the nearest surveyed block, say. Say so, so
+                # the next policy knows which rejections rest on a measurement.
+                inferred = self.siting.inferred_mask(name)
+                if inferred is not None:
+                    guessed = int((fails & inferred[rows, cols]).sum())
+                    if guessed:
+                        by_rule[f"{name} (inferred)"] = guessed
+                bad |= fails
+        return int(bad.sum()), by_rule
 
 
 # --------------------------------------------------------------------------- #
@@ -252,37 +316,7 @@ def tracts():
     return _TRACTS
 
 
-def _street_mask(bbox: tuple, res: float, shape: tuple, buffer_m: float) -> np.ndarray:
-    """Pixels within `buffer_m` of a SAM street centreline.
-
-    Scores are measured on pedestrian space rather than on every square metre of
-    the AOI: a policy that cools the middle of a parking lot has cooled nobody.
-    Falling back to "everywhere" if the layer is missing keeps a build without
-    `data/boston/` scoreable, at the cost of a softer denominator.
-    """
-    if not STREETS.exists():
-        return np.ones(shape, dtype=bool)
-    import geopandas as gpd
-    from pyproj import Transformer
-
-    minx, miny, maxx, maxy = bbox
-    tx = Transformer.from_crs(CRS, "EPSG:4326", always_xy=True)
-    x0, y0 = tx.transform(minx - buffer_m, miny - buffer_m)
-    x1, y1 = tx.transform(maxx + buffer_m, maxy + buffer_m)
-    seg = gpd.read_file(STREETS, bbox=(x0, y0, x1, y1)).to_crs(CRS)
-    if seg.empty:
-        return np.ones(shape, dtype=bool)
-    shapes = [(g, 1) for g in seg.buffer(buffer_m).geometry if not g.is_empty]
-    if not shapes:
-        return np.ones(shape, dtype=bool)
-    burn = rasterize(
-        shapes, out_shape=shape, transform=from_origin(minx, maxy, res, res),
-        fill=0, dtype="uint8", all_touched=True,
-    )
-    return burn.astype(bool)
-
-
-def load_context(aoi_dir: Path, pedestrian_buffer_m: float = 8.0) -> PlanningContext:
+def load_context(aoi_dir: Path) -> PlanningContext:
     """Assemble every grid a policy is allowed to see for one built AOI."""
     aoi_dir = Path(aoi_dir)
     meta = json.loads((aoi_dir / "aoi.json").read_text())
@@ -302,10 +336,12 @@ def load_context(aoi_dir: Path, pedestrian_buffer_m: float = 8.0) -> PlanningCon
         for key in ("heat_ta3pm", "heat_ta3am", "heat_uhii", "heat_hours")
     }
 
+    # Where a person can stand, and where an intervention is allowed to go. The
+    # siting masks come off the city's sidewalk, hydrant, streetlight and
+    # historic-district layers; see scripts/siting.py.
     walkable = np.isin(lc, list(GROUND_CODES))
-    near_street = _street_mask(bbox, res, shape, pedestrian_buffer_m)
-    exposure = walkable & near_street
-    plantable = exposure & np.isin(lc, (PAVED, GRASS, BARE)) & (cdsm <= 0.0)
+    sit = siting.build(bbox, res, shape, lc, cdsm)
+    exposure = sit["pedestrian"]
 
     # -- population and vulnerability, apportioned onto exposure pixels ------ #
     svi = tracts()
@@ -343,6 +379,13 @@ def load_context(aoi_dir: Path, pedestrian_buffer_m: float = 8.0) -> PlanningCon
     aois = json.loads((CONFIG / "aois.json").read_text())["aois"]
     name = meta["name"]
 
+    # `plantable` and `buildable` are just the siting rules for the two actions
+    # that carry every rule between them, kept as named grids because that is
+    # what a policy reaches for first. Land-cover eligibility is folded in so a
+    # policy that trusts them cannot fail the audit on either count.
+    plantable = np.isin(lc, (PAVED, GRASS, BARE)) & sit.allowed("tree_medium")
+    buildable = np.isin(lc, list(GROUND_CODES)) & sit.allowed("shade_canopy")
+
     return PlanningContext(
         name=name,
         split=aois.get(name, {}).get("split", "unknown"),
@@ -362,10 +405,17 @@ def load_context(aoi_dir: Path, pedestrian_buffer_m: float = 8.0) -> PlanningCon
         vulnerability=vulnerability,
         priority=priority,
         walkable=walkable,
-        near_street=near_street,
+        walkway=sit["walkway"],
+        crossing=sit["crossing"],
+        roadbed=sit["roadbed"],
+        design_review=sit["design_review"],
+        city_owned=sit["city_owned"],
         exposure=exposure,
         plantable=plantable,
+        buildable=buildable,
+        sidewalk_width_m=sit.sidewalk_width_m,
         interventions=interventions,
+        siting=sit,
     )
 
 
