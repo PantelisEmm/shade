@@ -49,11 +49,10 @@ def main() -> None:
     print(f"surface prepared in {time.time() - t0:.1f}s")
 
     location = solweig.Location.from_epw(str(epw))
-    weather = solweig.Weather.from_epw(str(epw))
     hours = {int(h) for h in args.hours.split(",")}
-    month, day = (int(v) for v in args.date.split("-"))
-    picked = [w for w in weather
-              if w.datetime.month == month and w.datetime.day == day and w.datetime.hour in hours]
+    picked = solweig.Weather.from_epw(
+        str(epw), start=args.date, end=args.date, hours=sorted(hours)
+    )
     if not picked:
         raise SystemExit(f"no EPW rows for {args.date} hours {sorted(hours)}")
     for w in picked:

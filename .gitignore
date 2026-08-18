@@ -27,6 +27,10 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+node_modules/
+dist/
+.vite/
+gui/public/data/
 
 # Office lock files
 ~$*

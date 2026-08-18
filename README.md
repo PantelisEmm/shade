@@ -45,6 +45,214 @@ Equivalent manual route: `conda env create -f environment.yml`. Not a conda user
 `requirements.txt` mirrors the same set for pip/venv, though the GDAL-backed wheels
 are less reliable to build than the conda-forge packages.
 
+## GUI
+
+The browser-based intervention studio is developed in reviewable milestones. To run
+the current interface locally:
+
+```bash
+cd gui
+npm install
+npm run dev
+```
+
+Open the local address printed by Vite. The interface bundles its fonts and visual
+assets rather than loading them from third-party services.
+
+To prepare the current Chinatown map from a clean clone using a local virtual
+environment:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+bash scripts/fetch_boston_open_data.sh
+unzip -o data/canopy/canopy_change_2019_2024.zip \
+  2019-2024Data/landcover_2024_boston.tif \
+  2019-2024Data/landcover_2024_boston.tif.aux.xml \
+  2019-2024Data/landcover_2024_boston.tif.ovr \
+  2019-2024Data/TreeCentroids2024.geojson -d data/canopy
+.venv/bin/python scripts/build_aoi.py --aoi chinatown
+.venv/bin/python gui/scripts/export_gui_layers.py --aoi chinatown
+```
+
+The generated GeoTIFFs and browser display layers are local artifacts excluded
+from git. Re-run the final command after rebuilding an AOI.
+
+Open **Design** to create tree interventions one at a time or with the brush.
+Single-tree placement and brushing use a generated offline mask: pavement and
+open land are allowed, while any crown footprint touching a building, water, or
+the study boundary is rejected. The brush diameter and density are adjustable,
+and each stroke creates separately selectable trees as one undoable action.
+Placed trees can be selected, dragged, resized, edited, and deleted; the layout
+is saved automatically in browser-local storage for the Chinatown workspace.
+Use **Remove trees** and drag a rectangle to delete every placed tree inside it;
+the design panel can repeatedly undo the most recent placement, brush stroke, or
+removal action.
+When the canopy layer is enabled, every placed tree also contributes a proposed
+crown using its current diameter and height; comparison mode clips those crowns
+to the intervention side and reports their gross added canopy area. The Map
+view's comparison divider also reveals the configured tree footprint using the
+existing vegetation color. Both canopy and land-cover changes are composited
+into full intervention rasters rather than drawn as separate circles. Tree
+sprites are intentionally confined to Design; Map and Results show only the
+intervention's layer or temperature effects.
+
+The second Design intervention is **High-SRI reflective pavement**. An adjustable
+brush paints any pavement class, click-to-select follows individual mapped street
+segments, and a rectangle erases all selected coating inside it; every operation
+clips to the offline pavement mask and can be undone. The silver texture appears only while
+designing. Area is stored as a compact local raster and cost is calculated at
+$8/m². Fast results use the Boston study's reported 6.1°C surface and 0.8°C UTCI
+effects on coated pixels; the summary area-weights those local effects across the
+study area, and its MRT effect is deliberately left unavailable until a full
+SOLWEIG run. Full runs apply albedo 0.45 per selected pixel in every SOLWEIG tile
+and permit overlap with trees, so reflected radiation is evaluated together with
+vegetation and building shade. Because high albedo redirects shortwave radiation,
+the physical MRT or UTCI result may show pedestrian warming even while the coated
+surface itself is cooler.
+
+The third Design intervention is **light-coloured cool roofs**. Click a mapped
+building to toggle its complete roof, brush across any part of a roof, or drag a
+rectangle to apply the treatment to every intersecting building. A separate
+rectangle erase tool removes every selected roof it intersects. All gestures act
+on complete roofs, all building-class pixels are eligible, and each stroke or
+rectangle is one undoable action. Selected roofs appear as a light-blue texture, persist in
+browser-local storage, and are costed at $25/m². No fast temperature effect is
+assumed: full SOLWEIG applies albedo 0.50 only to the selected building pixels
+and evaluates the roof treatment together with weather, geometry, shade, trees,
+and reflective pavement.
+
+The fourth Design intervention is **green roofs**. It uses the same whole-roof
+click, brush, area-select, and area-erase workflow, with a distinct light-green
+texture. Green and cool roofs are mutually exclusive per building; choosing one
+replaces the other, and Undo restores the displaced treatment. Green roofs are
+stored locally and costed at $250/m². A full SOLWEIG run keeps selected pixels
+classified as buildings so its geometry remains intact, while applying albedo
+0.25, emissivity 0.94, and SOLWEIG's class-5 grass thermal-response parameters.
+The current SOLWEIG API has no roof soil-water/evapotranspiration input, so that
+limitation is stated explicitly and no fast temperature effect is invented.
+
+The fifth Design intervention is **pavement to grass**. An adjustable brush or
+one-sided mapped-street selection converts eligible sidewalks, plazas, and
+parking pavement, while a separate rectangle restores selected areas. Clicking
+one side of a street affects only that side of the selected segment. The offline eligibility raster uses
+the 1 m pavement class together with mapped sidewalk/open-space data and excludes
+derived street corridors; Boston's source files do not provide authoritative
+road-edge widths or a complete parking-lot polygon layer, so this limitation is
+recorded in the generated layer manifest. Converted ground has a bright-green
+grass-line texture, persists locally, and is costed at $90/m². It is mutually
+exclusive with reflective pavement per pixel, but trees remain allowed. No fast
+temperature value is assumed: full SOLWEIG changes eligible class-1 pavement to
+class-5 grass at albedo 0.25 and uses grass thermal properties. Soil moisture and
+evapotranspiration are not explicitly represented by this SOLWEIG workflow.
+
+The sixth Design intervention is **fabric shade canopies**. Click the desired
+side of a mapped street segment or use the freehand brush to add a continuous
+line of uniformly top-down sail-and-pole icons at fixed 12 m intervals; width is adjustable
+with a 6 m segment default, the freehand brush has an independent adjustable diameter,
+and a rectangle removes selected coverage. The icon-only overhead layer
+does not recolor the ground; icons may bridge gaps up to 4 m from eligible pavement
+to preserve a line but are rejected on building roofs,
+and may overlap either grass conversion or reflective
+pavement. Canopies are limited to the same eligible non-road pavement mask,
+persist locally, and are costed at $200/m². Full SOLWEIG runs add a thin overhead
+CDSM/TDSM layer at 3 m while leaving the ground walkable. Because this SOLWEIG
+version accepts one transmissivity for all vegetation, 50% fabric transmission
+is approximated by a deterministic 50/50 shaded-and-open 1 m footprint. Shaded
+cells retain normal leaf-on transmissivity, so trees are not made artificially
+transparent. No fast temperature effect is assumed.
+
+The seventh Design intervention is **PV solar canopies**. It uses the same
+one-sided segment, freehand brush, rectangular erase, undo, and local-persistence
+workflow as fabric canopies, with dark photovoltaic-panel icons every 12 m. The
+two canopy types share the same sidewalk eligibility mask and cannot overlap. The
+simulation applies the full selected footprint at 3.5 m instead of the fabric
+canopy's alternating footprint, producing substantially more opaque overhead
+shade while leaving the ground walkable. Because the SOLWEIG run shares the
+leaf-on transmissivity setting with trees, the modeled PV layer retains roughly
+8% transmission rather than being mathematically opaque. Cost is estimated at
+$450/m²; electricity generation is recorded as a co-benefit but not quantified.
+
+Open **Results** with or without a proposed tree. With no intervention, it shows
+the existing-condition SOLWEIG map and mean; UTCI/perceived-temperature means
+exclude baseline building-roof pixels, while MRT retains the full AOI. After trees are placed, it
+adds the current intervention estimate or completed comparison.
+The full-height before/after divider is dragged directly on the map; no separate
+slider is used. Mean radiant temperature and UTCI/perceived temperature start
+from a precomputed existing-conditions SOLWEIG field for the representative
+July 27 at 1 PM scenario. The Conditions panel provides current climate, +2°C,
+humid +2°C, and +4°C stress tests, plus 10 AM, 1 PM, 4 PM, sunset, and night
+time choices. Until a full intervention run is requested, proposed
+tree changes use the fast spatial heuristic over that physical baseline. Surface
+temperature remains screening-only. Planting cost is shown separately below the
+uncertainty summary because it is non-spatial.
+
+When Results opens, the app looks in browser-local storage for an existing-
+conditions SOLWEIG baseline for the selected scenario, July 27, and hour. If the
+browser has not seen it, the app automatically requests one baseline-only run
+without proposed trees and shows its progress. Numerical results are cached under
+`runs/gui_solweig/cache/baseline_results/`, while the browser-ready map is cached
+under `gui/public/data/chinatown/solweig_baselines/`; a new browser still follows the
+first-use flow, but the runner can reuse identical physics instead of recomputing
+it. The top-bar **Reset** action clears all browser workspace state after
+confirmation and reloads the app, while deliberately preserving the reusable
+numerical cache.
+
+The temperature screen uses the medium-tree anchors shown in the interface
+(10°C MRT as a working heuristic, 2.8°C perceived cooling and 8.3°C surface
+cooling from the Boston study), with small trees set to 65% of the medium effect.
+Custom crown diameter and height apply a capped 0.55–1.6 geometric-mean scale;
+the displayed value is the mean local effect across placed trees, not an
+area-wide temperature change. Temperature bands are ±40%. For MRT and UTCI, the
+map renders the precomputed SOLWEIG baseline plus an intervention raster with
+smoothly distributed tree cooling; surface temperature uses the earlier
+screening baseline. The divider reveals the intervention; there are no
+tree-radius result circles. The fast tree adjustment is not a physical shadow
+or radiation calculation. Cost sums the `tree_small` and `tree_medium` values in
+`config/interventions.json`, uses a ±35% band, and remains a non-spatial summary.
+
+### Optional full SOLWEIG simulation
+
+Milestone 5 adds a local, user-triggered full simulation; it never runs merely
+because a tree was added or moved. In Results, choose **Run full SOLWEIG**, review
+the selected July 27 climate scenario and time, and start or cancel the run explicitly.
+The Vite development server launches the runner with `.venv/bin/python`, exposes
+live progress to the browser, and keeps the most recent successful result active
+if a later run fails or is cancelled.
+
+The runner physically writes the current crowns into a copy of Chinatown's CDSM
+and land-cover grid, then runs SOLWEIG for both existing conditions and the tree
+intervention. Expensive prepared geometry and identical completed layouts are
+cached under `runs/gui_solweig/`; browser-ready MRT and UTCI rasters are written
+under `gui/public/data/chinatown/simulations/`. Both locations are generated local
+artifacts excluded from git. Reusable existing-conditions fields are exported by
+scenario and hour under `gui/public/data/chinatown/solweig_baselines/`, with a JSON
+file beside each PNG carrying its color scale and provenance.
+
+The completed simulation becomes the result baseline. If the design is then
+changed, the GUI retains those physical rasters and applies the fast Gaussian
+tree heuristic only for the difference between the simulated snapshot and the
+current layout. The status changes from **SOLWEIG result** to
+**SOLWEIG-calibrated estimate**, and rerunning replaces it with a new exact
+snapshot. This SOLWEIG build does not expose surface temperature as a summary
+grid, so that metric remains clearly marked screening-only.
+
+The GUI runner versions its intervention physics cache. Results created before
+the tiled pavement, roof-baseline, green-roof, pavement-to-grass, and shade-canopy implementations are not loaded
+as current physical results. Tree geometry is cached independently; pavement,
+cool-roof, green-roof, grass-conversion, and shade-canopy masks participate in the
+result cache without changing building geometry.
+
+The first run requires the generated weather scenarios:
+
+```bash
+bash scripts/fetch_boston_open_data.sh
+.venv/bin/python scripts/make_weather_scenarios.py
+```
+
+For a direct command-line run, create the same request shape used by the local
+API and pass it to `gui/scripts/run_gui_solweig.py --request <request.json>`.
+
 ## Data
 
 Nothing under `data/` or `runs/` is tracked. To reproduce it:
