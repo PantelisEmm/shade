@@ -204,7 +204,10 @@ THE ALBEDO TRAP: shade moves perceived temperature (UTCI) strongly.
   than one that buys shade. Trees and canopies dominate for UTCI relief.
 
 Other reported scores (not the fitness, but important):
-  equity_ratio: relief in top-vulnerability areas / overall. >1 = helping the vulnerable more.
+  equity_ratio: relief in top-vulnerability areas / overall, pooled over every AOI.
+    >1 = helping the vulnerable more. Vulnerability is flat within a census tract,
+    so this responds to which tracts you treat, not which streets inside one --
+    and some AOIs contain no top-quartile tract, so spending there lowers it.
   access_gain_pp: share of exposed residents moved below the 32C UTCI heat-stress threshold.
   cost_efficiency_person_c_per_100k: person-degC of relief per $100k spent.
   cobenefit_greened_pct: new canopy or green area as % of walkable ground.

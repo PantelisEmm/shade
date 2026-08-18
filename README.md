@@ -105,11 +105,26 @@ plus a row per run in `runs/score_log.csv`:
 | --- | --- |
 | `heat_relief_c` | population-weighted drop in daytime UTCI on pedestrian space |
 | `access_gain_pp` | share of exposed residents moved below the UTCI stress threshold |
-| `equity_ratio` | relief in the top citywide vulnerability quartile ÷ relief overall |
+| `equity_ratio` | relief in the top citywide vulnerability quartile ÷ relief overall, pooled over AOIs — see below |
 | `cobenefit_greened_pct` | new green and canopy as a share of walkable ground |
 | `cost_efficiency_person_c_per_100k` | person·°C of relief bought per $100k |
 | `worst_aoi_*`, `worst_scenario_*` | the same relief where the policy holds up worst |
 | `tmrt_relief_c` | **diagnostic, not a score** — see below |
+
+`equity_ratio` is pooled across AOIs rather than averaged per AOI, because census tracts
+and AOIs are separate tilings and the per-AOI ratio is degenerate on most of them. Tracts
+have a median area of 0.43 km²; every AOI is a fixed 1 km² window, overlapping six tracts
+at the median. **Seven of the 20 AOIs contain no top-quartile tract** (the per-AOI ratio is
+undefined) and **three contain nothing else** (it is 1.0 by construction, since the
+priority weights are then the whole weight), so a mean of per-AOI ratios averaged a
+shifting subset diluted toward 1.0 — two opposite policies could score identically.
+Pooling counts an AOI with no vulnerable residents in the denominator only, which is the
+honest reading: money spent where they are not. `equity_relief_c` and `pooled_relief_c`
+report the two halves, and `equity_aois` says how many AOIs could contribute at all.
+Note `pooled_relief_c` is population-weighted across AOIs while `heat_relief_c` is a mean
+of per-AOI means (the budget is per AOI), so the two are not each other's denominators.
+Vulnerability is flat within a tract throughout, so the ratio responds to which tracts a
+policy treats and never to which streets inside one.
 
 Tmrt is reported next to UTCI because the two diverge exactly where the trap is.
 Raising pavement albedo cools the *surface* and reflects more shortwave onto the
