@@ -17,6 +17,8 @@ _PREFIX = Path(sys.executable).parent
 for _var, _sub in (("GDAL_DATA", "Library/share/gdal"), ("PROJ_LIB", "Library/share/proj")):
     if _var not in os.environ and (_PREFIX / _sub).is_dir():
         os.environ[_var] = str(_PREFIX / _sub)
+# SOLWEIG logs a Unicode check mark that the Windows cp1252 console cannot encode.
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 import numpy as np
 import solweig
@@ -30,13 +32,22 @@ def main() -> None:
     ap.add_argument("--scenario", default="baseline")
     ap.add_argument("--date", default="07-27", help="MM-DD to simulate")
     ap.add_argument("--hours", default="15", help="comma-separated hours of day")
+    ap.add_argument("--gpu", action="store_true",
+                    help="leave the GPU enabled. Off by default: an integrated GPU "
+                         "reporting little VRAM caps SOLWEIG's tile side below the "
+                         "shadow buffer, which collapses SVF tiling to one tile per "
+                         "pixel and never finishes. See DATA_MANIFEST.md section 9.")
     args = ap.parse_args()
+
+    if not args.gpu:
+        # Must happen before any tiling call: max_tile_side is cached per context.
+        solweig.disable_gpu()
 
     aoi = ROOT / "data" / "aoi" / args.aoi
     epw = ROOT / "data" / "weather" / "scenarios" / f"boston_{args.scenario}.epw"
     out = ROOT / "runs" / f"smoke_{args.aoi}_{args.scenario}"
-    print(f"AOI      {aoi}")
-    print(f"weather  {epw.name}")
+    print(f"AOI      {aoi}", flush=True)
+    print(f"weather  {epw.name}", flush=True)
 
     t0 = time.time()
     surface = solweig.SurfaceData.prepare(
@@ -46,13 +57,13 @@ def main() -> None:
         land_cover=str(aoi / "landcover.tif"),
         working_dir=str(out / "cache"),
     )
-    print(f"surface prepared in {time.time() - t0:.1f}s")
+    t_prepare = time.time() - t0
+    print(f"surface prepared in {t_prepare:.1f}s", flush=True)
 
     location = solweig.Location.from_epw(str(epw))
-    hours = {int(h) for h in args.hours.split(",")}
-    picked = solweig.Weather.from_epw(
-        str(epw), start=args.date, end=args.date, hours=sorted(hours)
-    )
+    hours = sorted(int(h) for h in args.hours.split(","))
+    # from_epw defaults to the file's FIRST day only, so the window is explicit.
+    picked = solweig.Weather.from_epw(str(epw), start=args.date, end=args.date, hours=hours)
     if not picked:
         raise SystemExit(f"no EPW rows for {args.date} hours {sorted(hours)}")
     for w in picked:
@@ -66,7 +77,9 @@ def main() -> None:
         output_dir=str(out),
         outputs=["tmrt", "shadow", "utci"],
     )
-    print(f"solweig ran in {time.time() - t0:.1f}s")
+    t_calc = time.time() - t0
+    print(f"solweig ran in {t_calc:.1f}s "
+          f"({t_calc / max(len(picked), 1):.1f}s per timestep)", flush=True)
 
     for name in ("tmrt_mean", "utci_max", "tmrt_max"):
         arr = getattr(summary, name, None)

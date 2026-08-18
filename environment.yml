@@ -36,3 +36,4 @@ dependencies:
   - pip
   - pip:
       - solweig
+      - google-generativeai

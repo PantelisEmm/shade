@@ -54,4 +54,34 @@ get boston/community_centers.geojson          "https://data.boston.gov/dataset/3
 get boston/community_center_pools.geojson     "https://data.boston.gov/dataset/321c0d5f-fade-4cd1-be50-4674419fd946/resource/b61ef2fd-1324-4482-8ccd-4228f17dc0d7/download/community_center_pools.geojson"
 get boston/public_libraries.geojson           "https://data.boston.gov/dataset/552df2e4-0db0-4fd6-b20f-4535695f17a4/resource/ad99c2c2-bcdd-4764-af15-786b8c8a3556/download/public_libraries.geojson"
 get boston/main_streets_districts.geojson     "https://services.arcgis.com/sFnw0xNflSi8J0uh/ArcGIS/rest/services/Main_Streets_District_2019/FeatureServer/0/query?where=1%3D1&outFields=*&outSR=26986&f=geojson"
+
+## --- siting constraints (where an intervention may physically go) ---
+# Consumed by scripts/siting.py together with the sidewalk centrelines and street
+# segments above. See config/siting.json for the rule each one backs.
+get boston/fire_hydrants.geojson              "https://data.boston.gov/dataset/1f43041c-e2ff-4784-b537-3ecb7ceae066/resource/1ce1845b-ab8e-4a82-a297-b8b00083a4ca/download/fire_hydrants.geojson"
+get boston/streetlight_locations.csv          "https://data.boston.gov/dataset/52b0fdad-4037-460c-9c92-290f5774ab2b/resource/c2fcc1e3-c38f-44ad-a0cf-e5ea2a6585b5/download/streetlight-locations.csv"
+get boston/blc_historic_districts.geojson     "https://data.boston.gov/dataset/a30e72b5-ff9f-4219-9ed1-d82e5382e914/resource/a3a58feb-e355-4fd0-a12d-47e3d0a311dd/download/boston_landmarks_commission_blc_historic_districts.geojson"
+# Sidewalk polygons with a surveyed SWK_WIDTH in feet (PWD survey, 2014) -- the one
+# layer that makes the 6 ft planting width rule testable rather than inferred.
+get boston/sidewalk_inventory.geojson         "https://data.boston.gov/dataset/57b57bc6-6344-48ca-9316-95961213a38e/resource/2faee1d9-484a-4f3a-b42f-d5c3b6663f75/download/sidewalk_inventory.geojson"
+# Parcels the city actually owns, so a plan that spends on private roofs is visible.
+get boston/city_land_audit.geojson            "https://data.boston.gov/dataset/3191edf4-eafb-420a-bf6c-0957d82cd942/resource/6c830e25-6bb6-4ed6-9675-ea38abec3d4a/download/city_land_audit_public.geojson"
+
+## --- pedestrian activity (scripts/footfall.py; NOT used by the scorer, see
+##     config/footfall.json -- kept as the evidence for the residence assumption) ---
+get boston/public_schools.geojson             "https://data.boston.gov/dataset/4df4b9c7-239d-4643-ac21-a22b42c832df/resource/fd47065d-7f9a-4564-8090-aa9166b1b944/download/public_schools.geojson"
+get boston/non_public_schools.geojson         "https://data.boston.gov/dataset/a8944f1a-aa6b-4d0c-8d68-e3b2338a9c34/resource/f6330a35-c451-4d10-90b7-7f038f355699/download/non_public_schools.geojson"
+get boston/colleges_and_universities.geojson  "https://data.boston.gov/dataset/7624a2d6-ca74-4fc1-9bba-d6e89d4ca9c7/resource/139b6ce0-ef39-48c7-aeb3-7b7f67b9d8af/download/colleges_and_universities.geojson"
+# Pedestrian-involved records are the only citywide pedestrian signal Boston publishes.
+get boston/vision_zero_crashes.csv            "https://data.boston.gov/dataset/7b29c1b2-7ec2-4023-8292-c24f5d8f0905/resource/e4bfe397-6bfc-49c5-9367-c879fac7401d/download/tmpo50ge3my.csv"
+get transit/mbta_gtfs.zip                     "https://cdn.mbta.com/MBTA_GTFS.zip"
+get transit/mbta_rail_ridership.csv           "https://mbta-massdot.opendata.arcgis.com/api/download/v1/items/9fea7862501f4c59ab2c001ad6ae19b0/csv?layers=0"
+
+## --- tree growth (not a Boston layer) ---
+# USDA Forest Service Urban Tree Database, McPherson/van Doorn/Peper 2016
+# (RDS-2016-0005). Allometric equations by species and climate region; the NoEast
+# region weighted by Boston's own species mix gives the age-to-size curve that
+# scripts/build_growth_curve.py writes and --horizon-years reads.
+get canopy/urban_tree_database.zip            "https://www.fs.usda.gov/rds/archive/products/RDS-2016-0005/RDS-2016-0005.zip"
+
 echo "DONE"

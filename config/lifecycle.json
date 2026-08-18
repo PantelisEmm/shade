@@ -1,0 +1,47 @@
+{
+  "description": "What each intervention is some number of years after it is built, rather than on the day it is built. config/interventions.json describes a finished asset -- a tree with a 2.5 m crown, a shade sail that is simply there. This file says how long the tree takes to get there, how likely it is to still be alive, and when the sail wears out. scripts/lifecycle.py turns it into the geometry the scorer actually simulates at `--horizon-years`.",
+
+  "sources": {
+    "growth": "Boston-weighted age-to-size curve in data/canopy/derived/boston_growth_curve.json, built by scripts/build_growth_curve.py from McPherson, van Doorn & Peper (2016), Urban Tree Database and Allometric Equations (USDA FS RDS-2016-0005 / PSW-GTR-253), region NoEast, weighted by the species mix in Boston's own street tree inventory. UTD age is years since planting, so horizon years map onto it directly.",
+    "mortality": "Roman & Scatena (2011), 'Street tree survival rates: meta-analysis of previous studies and application to a field survey in Philadelphia, PA', Urban Forestry & Urban Greening 10(4). Meta-analysis of 16 studies: annual street tree mortality 3.5-5.1 %, population half-life 13-20 years, mean life expectancy 19-28 years.",
+    "asset_life": "lifetime_years in config/interventions.json, which were order-of-magnitude figures alongside the unit costs.",
+    "establishment": "establishment_years in config/interventions.json -- Boston's planting contract includes two years of establishment watering."
+  },
+
+  "appraisal": {
+    "default_horizon_years": null,
+    "annual_mortality_rate": 0.043,
+    "note": "default_horizon_years null means the scorer simulates the finished asset exactly as config/interventions.json describes it, which is the behaviour every existing score was produced under. Pass --horizon-years to simulate what is standing at that age instead. The mortality rate is the midpoint of the 3.5-5.1 % meta-analytic range and is applied uniformly; real mortality is front-loaded into the establishment years, which this does not capture."
+  },
+
+  "actions": {
+    "tree_small": {
+      "kind": "tree",
+      "crown_radius_scale": 0.6,
+      "max_height_m": 8.0,
+      "establishment_years": 2,
+      "asset_life_years": 40,
+      "note": "Scale and height cap relative to the shared growth curve. 0.6 is the crown radius ratio config/interventions.json already implies (1.5 m against 2.5 m); the height cap stands for the under-wire species a small tree is chosen for."
+    },
+    "tree_medium": {
+      "kind": "tree",
+      "crown_radius_scale": 1.0,
+      "max_height_m": null,
+      "establishment_years": 2,
+      "asset_life_years": 40
+    },
+    "shade_canopy":     {"kind": "built", "asset_life_years": 12},
+    "solar_canopy":     {"kind": "built", "asset_life_years": 25},
+    "light_road":       {"kind": "surface", "asset_life_years": 8},
+    "cool_roof":        {"kind": "surface", "asset_life_years": 15},
+    "green_roof":       {"kind": "surface", "asset_life_years": 30},
+    "grass_conversion": {"kind": "surface", "asset_life_years": 30}
+  },
+
+  "known_tensions": [
+    "config/interventions.json gives tree_medium a 2.5 m crown radius and a 5 m stem. On the Boston growth curve a 2.5 m radius arrives at about year 8, by which point the same tree is nearer 7 m tall. The configured pair is not a tree of any single age, and the height is the half that matters for shadow length.",
+    "The configured 40-year tree life sits against a meta-analytic mean street tree life expectancy of 19-28 years. Both are kept: 40 is read as the design life of the asset and the mortality rate carries the attrition, so survival at 40 years is about 17 % rather than 100 %.",
+    "Mortality is applied as a flat annual rate. Real street tree mortality is concentrated in the first few years after planting, so survival at short horizons is optimistic here and survival at long horizons is pessimistic.",
+    "Albedo and green-roof performance decays with soiling and weathering well before the asset is replaced. Nothing here models that; a surface action is at full strength until its life runs out and absent afterwards."
+  ]
+}
