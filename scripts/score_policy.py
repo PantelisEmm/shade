@@ -16,7 +16,8 @@ The objective vector, all "higher is better":
 
     heat_relief_c        population-weighted drop in daytime UTCI on pedestrian space
     access_gain_pp       share of exposed residents moved below the UTCI threshold
-    equity_ratio         relief in the top-vulnerability quartile / relief overall
+    equity_ratio         relief in the top-vulnerability quartile / relief overall,
+                         pooled over AOIs rather than averaged per AOI
     cobenefit_greened_pct   new green and canopy as a share of walkable ground
     cost_efficiency      person-degC of relief bought per $100k
     worst_aoi_*          the same relief at the AOI that gained least
@@ -113,6 +114,12 @@ KNOWN_BIASES = [
     "projections. They answer 'does this hold up when it gets hotter' and nothing more.",
     "Population is a tract-share proxy spread over pedestrian pixels, not a claim about "
     "where anyone lives or stands.",
+    "Vulnerability is flat within a census tract, so equity_ratio responds to which "
+    "tracts a policy treats and never to which streets inside one. Tracts (median "
+    "0.43 km2) and AOIs (1 km2) are separate tilings: seven of the twenty AOIs hold no "
+    "top-quartile tract and three hold nothing else, so the ratio is pooled across AOIs "
+    "and equity_aois reports how many could contribute. Scores from before it was "
+    "pooled averaged the per-AOI ratios and are not comparable with these.",
     "Scores are only comparable at a fixed resolution: coarsening biases mean Tmrt warm.",
     "access_gain_pp is measured against a fixed UTCI threshold, so it saturates in the "
     "warmer scenarios: when almost nobody can be moved below it, the objective goes "
@@ -595,6 +602,11 @@ def objectives(ctx, win, base, interv, applied, spend, threshold_c) -> dict:
         "equity_pop_share": _round(
             float(priority_weight.sum()) / pop_total if pop_total > 0 else None
         ),
+        # The unnormalised halves of the equity terms. `aggregate` pools these
+        # across AOIs rather than averaging the per-AOI ratios, so they are
+        # carried here exactly rather than reconstructed from a rounded ratio.
+        "equity_pop": _round(float(priority_weight.sum()), 1),
+        "equity_person_degc": _round(float((relief * priority_weight).sum()), 1),
         "cobenefit_greened_pct": _round(100.0 * greened / ground_m2 if ground_m2 else None),
         "pv_mwh_per_yr": stats["pv_mwh_per_yr"],
         "cost_efficiency_person_c_per_100k": _round(
@@ -626,10 +638,21 @@ def aggregate(runs: list[dict]) -> dict:
     does it fall over", which is the question a policy that only works on one
     kind of street will fail. Cost efficiency is pooled rather than averaged so
     a cheap AOI cannot carry an expensive one.
+
+    `equity_ratio` is pooled for a sharper reason: tracts and AOIs are separate
+    tilings, so of the 20 AOIs seven contain no top-quartile tract at all (the
+    per-AOI ratio is None) and three are made of nothing else (it is 1.0 by
+    construction, since the priority weights are then the whole weight). A mean
+    of per-AOI ratios therefore averages a shifting subset diluted toward 1.0.
+    Pooling lets an AOI with no vulnerable residents count in the denominator,
+    which is the honest reading: money spent where they are not.
     """
     def mean_of(key: str, rows) -> float | None:
         vals = [r["metrics"][key] for r in rows if r["metrics"].get(key) is not None]
         return _round(float(np.mean(vals))) if vals else None
+
+    def total_of(key: str, rows) -> float:
+        return float(sum(r["metrics"].get(key) or 0.0 for r in rows))
 
     by_aoi: dict[str, list] = {}
     by_scenario: dict[str, list] = {}
@@ -646,6 +669,40 @@ def aggregate(runs: list[dict]) -> dict:
         ((v, s) for s, v in scen_relief.items() if v is not None), default=(None, None)
     )
 
+    # Equity, pooled over AOIs within a scenario and then averaged over
+    # scenarios -- a warmer scenario carries larger reliefs, not more people, so
+    # pooling across scenarios too would let it weight the ratio.
+    def pooled_relief(rows) -> tuple[float | None, float | None]:
+        """(all, top-quartile-only) population-weighted relief over these rows."""
+        pop, pri_pop = total_of("pop_exposed", rows), total_of("equity_pop", rows)
+        return (
+            total_of("person_degc", rows) / pop if pop > 0 else None,
+            total_of("equity_person_degc", rows) / pri_pop if pri_pop > 0 else None,
+        )
+
+    scen_ratio, scen_all, scen_pri = [], [], []
+    for rows in by_scenario.values():
+        overall, priority = pooled_relief(rows)
+        if overall is not None:
+            scen_all.append(overall)
+        if priority is not None:
+            scen_pri.append(priority)
+        # Same sign guard as the per-AOI term: a ratio of two negatives reads as
+        # "concentrated on the vulnerable" when it means they were hurt most.
+        # Pooled over every AOI it fires far less often than it did per-AOI.
+        if overall is not None and priority is not None and overall > 0.01:
+            scen_ratio.append(priority / overall)
+
+    def _mean(vals) -> float | None:
+        return _round(float(np.mean(vals))) if vals else None
+
+    pop_total = total_of("pop_exposed", runs)
+    # How many AOIs the equity terms can speak for at all. A pooled ratio hides
+    # that seven of the twenty AOIs hold no top-quartile tract; this does not.
+    equity_aois = sum(
+        1 for rows in by_aoi.values() if total_of("equity_pop", rows) > 0
+    )
+
     person_degc = sum(r["metrics"]["person_degc"] or 0.0 for r in runs)
     # One AOI's spend is the same in every scenario, so pool over AOIs only.
     spend = sum(rows[0]["spend_usd"] for rows in by_aoi.values())
@@ -654,7 +711,17 @@ def aggregate(runs: list[dict]) -> dict:
     return {
         "heat_relief_c": mean_of("heat_relief_c", runs),
         "access_gain_pp": mean_of("access_gain_pp", runs),
-        "equity_ratio": mean_of("equity_ratio", runs),
+        "equity_ratio": _mean(scen_ratio),
+        # The two halves of that ratio, so it is readable on its own terms.
+        # `pooled_relief_c` is population-weighted across AOIs and so is NOT the
+        # denominator of `heat_relief_c`, which is a mean of per-AOI means
+        # because the budget is per AOI. Do not divide one by the other.
+        "equity_relief_c": _mean(scen_pri),
+        "pooled_relief_c": _mean(scen_all),
+        "equity_pop_share": _round(
+            total_of("equity_pop", runs) / pop_total if pop_total > 0 else None
+        ),
+        "equity_aois": equity_aois,
         "cobenefit_greened_pct": mean_of("cobenefit_greened_pct", runs),
         "cost_efficiency_person_c_per_100k": _round(
             (person_degc / scenarios) / (spend / 1e5) if spend > 0 else None
@@ -705,6 +772,11 @@ def aoi_path(name: str, res: float) -> Path:
     if not (path / "aoi.json").exists():
         raise SystemExit(f"{path} is not built; run scripts/build_aoi.py --aoi {name}")
     return path
+
+
+# Per-run metrics that exist only to be pooled in `aggregate`, kept out of the
+# cross-policy log so they do not widen a header that outlives this script.
+LOG_EXCLUDE = frozenset({"equity_pop", "equity_person_degc"})
 
 
 def write_log(row: dict) -> None:
@@ -969,7 +1041,10 @@ def main() -> None:
                 "res_m": args.res,
                 "budget_usd": args.budget,
                 "spend_usd": spend["total_usd"],
-                **{k: v for k, v in metrics.items()},
+                # equity_pop/equity_person_degc are the unnormalised inputs
+                # `aggregate` pools; the log already carries the ratio and the
+                # share they reduce to, so they would only widen the header.
+                **{k: v for k, v in metrics.items() if k not in LOG_EXCLUDE},
             })
         del ctx
 
