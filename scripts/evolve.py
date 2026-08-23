@@ -30,12 +30,23 @@ import re
 import subprocess
 import sys
 import time
+from itertools import product
+from statistics import median
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config"
 RUNS = ROOT / "runs"
+
+# MAP-Elites axes: (metric_name, fixed_threshold_or_None).
+# None means "compute median from seeding phase."
+MAP_AXES = [
+    ("equity_ratio",                      1.0),   # fixed: >=1 means helping vulnerable more
+    ("access_gain_pp",                    None),   # median from seeding
+    ("cost_efficiency_person_c_per_100k", None),   # median from seeding
+    ("cobenefit_greened_pct",             None),   # median from seeding
+]
 
 
 # ── LLM interface ──────────────────────────────────────────────────────── #
@@ -242,7 +253,12 @@ be fully self-contained and runnable.
 """
 
 
-def build_user_prompt(parent: dict, inspirations: list[dict]) -> str:
+def build_user_prompt(
+    parent: dict,
+    inspirations: list[dict],
+    *,
+    map_elites_context: dict | None = None,
+) -> str:
     """Build the per-generation prompt from parent + inspirations."""
     parts = []
 
@@ -265,6 +281,38 @@ def build_user_prompt(parent: dict, inspirations: list[dict]) -> str:
         parts.append(f"Violations: {json.dumps(parent['violations'], indent=2)}")
     parts.append(f"\n```python\n{parent['code']}\n```\n")
 
+    # MAP-Elites grid context (only when active)
+    if map_elites_context is not None:
+        me = map_elites_context
+        parts.append("## MAP-Elites grid context\n")
+        parts.append(
+            f"You are improving cell {tuple(me['parent_cell'])} "
+            f"in a 4D behavior grid.\n"
+        )
+        parts.append("Axes and thresholds (low=0, high=1):")
+        for axis_name in me["axes"]:
+            t = me["thresholds"][axis_name]
+            parts.append(f"  {axis_name} >= {t:.4g} \u2192 high")
+
+        total_cells = 2 ** len(me["axes"])
+        occupied = me["grid_summary"]
+        parts.append(f"\nOccupied cells ({len(occupied)}/{total_cells}):")
+        for entry in occupied:
+            cell_str = str(tuple(entry["cell"]))
+            marker = " \u2190 your parent" if entry["cell"] == me["parent_cell"] else ""
+            parts.append(
+                f"  {cell_str}: fitness={entry['fitness']:.4f}  "
+                f"\"{entry['policy_name']}\"{marker}"
+            )
+
+        empty = []
+        for combo in product(range(2), repeat=len(me["axes"])):
+            if list(combo) not in [e["cell"] for e in occupied]:
+                empty.append(str(combo))
+        if empty:
+            parts.append(f"\nEmpty cells ({len(empty)}/{total_cells}): {', '.join(empty)}")
+        parts.append("")
+
     # Inspirations
     for i, insp in enumerate(inspirations, 1):
         parts.append(f"## Inspiration {i} (another approach from the database)\n")
@@ -282,7 +330,29 @@ def build_user_prompt(parent: dict, inspirations: list[dict]) -> str:
     fitness_str = ""
     if parent.get("fitness") is not None:
         fitness_str = f" of {parent['fitness']}"
-    parts.append(f"""## Your task
+
+    if map_elites_context is not None:
+        me = map_elites_context
+        parts.append(f"""## Your task
+
+Your parent is the champion of cell {tuple(me['parent_cell'])} with fitness{fitness_str}.
+
+You can EITHER:
+1. Beat this cell's champion fitness ({parent.get('fitness')}), keeping a similar
+   behavioral profile (equity, access, efficiency, greening), OR
+2. Explore a fundamentally different strategy that lands in an EMPTY cell —
+   especially cells with high equity (first axis = 1), which no policy may have achieved yet.
+
+Think about:
+- Different budget splits between actions (trees vs canopies vs other)
+- Different priority surfaces or ranking strategies
+- Better spatial strategies (spacing, clustering, corridor coverage)
+- Targeting different populations, heat patterns, or vulnerability
+- Creative use of all 8 available actions
+
+Write the COMPLETE Python module. It must be standalone and runnable.""")
+    else:
+        parts.append(f"""## Your task
 
 Write a new policy that improves on the parent's heat_relief_c{fitness_str}.
 
@@ -338,6 +408,82 @@ def sample_inspirations(candidates: list[dict], exclude_id: str, n: int = 2) -> 
     if not pool:
         return []
     return random.sample(pool, min(n, len(pool)))
+
+
+# ── MAP-Elites machinery ──────────────────────────────────────────────── #
+
+def compute_thresholds(candidates: list[dict]) -> dict[str, float]:
+    """Compute bin thresholds from feasible candidates.
+
+    Fixed thresholds (e.g. equity_ratio = 1.0) are used as-is.
+    Others are set to the median of all feasible values for that metric.
+    """
+    feasible = [c for c in candidates
+                if c.get("objectives") and c.get("fitness") is not None]
+    thresholds: dict[str, float] = {}
+    for name, fixed in MAP_AXES:
+        if fixed is not None:
+            thresholds[name] = fixed
+        else:
+            vals = [c["objectives"][name] for c in feasible
+                    if c["objectives"].get(name) is not None]
+            thresholds[name] = median(vals) if vals else 0.0
+    return thresholds
+
+
+def candidate_cell(
+    candidate: dict, thresholds: dict[str, float]
+) -> tuple[int, ...] | None:
+    """Map a candidate to its 4D grid cell, or None if objectives are missing."""
+    obj = candidate.get("objectives")
+    if not obj:
+        return None
+    bins = []
+    for name, _ in MAP_AXES:
+        val = obj.get(name)
+        if val is None:
+            return None
+        bins.append(1 if val >= thresholds[name] else 0)
+    return tuple(bins)
+
+
+def build_grid(
+    candidates: list[dict], thresholds: dict[str, float]
+) -> dict[tuple[int, ...], dict]:
+    """Place all feasible candidates in the MAP-Elites grid.
+
+    Each cell keeps only the champion (highest fitness).
+    """
+    grid: dict[tuple[int, ...], dict] = {}
+    for c in candidates:
+        if c.get("fitness") is None:
+            continue
+        cell = candidate_cell(c, thresholds)
+        if cell is None:
+            continue
+        if cell not in grid or c["fitness"] > grid[cell]["fitness"]:
+            grid[cell] = c
+    return grid
+
+
+def select_parent_mapelites(
+    grid: dict[tuple[int, ...], dict],
+) -> tuple[tuple[int, ...], dict]:
+    """Uniform random selection of an occupied cell's champion."""
+    cells = list(grid.keys())
+    cell = random.choice(cells)
+    return cell, grid[cell]
+
+
+def select_inspirations_mapelites(
+    grid: dict[tuple[int, ...], dict],
+    parent_cell: tuple[int, ...],
+    n: int = 2,
+) -> list[dict]:
+    """Sample inspiration candidates from cells other than the parent's."""
+    other = [c for c in grid if c != parent_cell]
+    chosen = random.sample(other, min(n, len(other)))
+    return [grid[c] for c in chosen]
 
 
 # ── scoring ────────────────────────────────────────────────────────────── #
@@ -413,6 +559,8 @@ def main() -> None:
                      help="seconds for plan() to run (default 120)")
     ap.add_argument("--score-timeout", type=float, default=600.0,
                      help="wall-clock timeout for the scoring subprocess (default 600)")
+    ap.add_argument("--seed-generations", type=int, default=5,
+                     help="generations of random exploration before MAP-Elites (default 5)")
     ap.add_argument("--out", help="output directory (default runs/evolve_<timestamp>)")
     args = ap.parse_args()
 
@@ -436,6 +584,7 @@ def main() -> None:
     print(f"  aoi:          {args.aoi}")
     print(f"  budget:       ${args.budget:,.0f}")
     print(f"  generations:  {args.generations}")
+    print(f"  seed-gens:    {args.seed_generations}")
     print(f"  model:        {args.model}")
     print(f"  seed:         {seed_path.name}")
     print()
@@ -497,22 +646,66 @@ def main() -> None:
     system_prompt = build_system_prompt()
 
     # -- evolution loop --------------------------------------------------- #
+    thresholds = None
+    map_elites_active = False
+
     for gen in range(1, args.generations + 1):
         print(f"gen {gen}  ", end="", flush=True)
         candidates = load_candidates(run_dir)
+        feasible = [c for c in candidates if c.get("fitness") is not None]
 
-        # Select parent (best feasible so far)
-        parent = best_candidate(candidates)
-        if parent is None:
-            # No feasible candidate yet -- use seed anyway
-            parent = candidates[0]
-            print("(no feasible parent, using seed)  ", end="", flush=True)
+        # -- Phase transition check ---------------------------------------- #
+        if not map_elites_active:
+            if gen > args.seed_generations and len(feasible) >= 2:
+                thresholds = compute_thresholds(feasible)
+                (run_dir / "thresholds.json").write_text(
+                    json.dumps(thresholds, indent=2), encoding="utf-8"
+                )
+                map_elites_active = True
+                print()
+                print(f">>> MAP-Elites activated at gen {gen} "
+                      f"with {len(feasible)} feasible candidates")
+                for ax, val in thresholds.items():
+                    print(f"    {ax}: {val:.4g}")
+                print()
+                print(f"gen {gen}  ", end="", flush=True)
+            elif gen > args.seed_generations:
+                print(f"(extending seeding: only {len(feasible)} feasible)  ",
+                      end="", flush=True)
 
-        # Select inspirations
-        inspirations = sample_inspirations(candidates, parent["id"], n=2)
+        # -- Parent & inspiration selection -------------------------------- #
+        me_context = None
+        parent_cell = None
+
+        if map_elites_active:
+            grid = build_grid(candidates, thresholds)
+            parent_cell, parent = select_parent_mapelites(grid)
+            inspirations = select_inspirations_mapelites(grid, parent_cell, n=2)
+
+            grid_summary = [
+                {"cell": list(cell), "fitness": champ["fitness"],
+                 "policy_name": champ.get("policy_name", "?")}
+                for cell, champ in sorted(grid.items())
+            ]
+            me_context = {
+                "parent_cell": list(parent_cell),
+                "thresholds": thresholds,
+                "grid_summary": grid_summary,
+                "axes": [name for name, _ in MAP_AXES],
+            }
+        else:
+            # Seeding phase: random parent to encourage diversity
+            if feasible:
+                parent = random.choice(feasible)
+            else:
+                parent = candidates[0]
+                print("(no feasible parent, using seed)  ", end="", flush=True)
+            inspirations = sample_inspirations(candidates, parent["id"], n=2)
 
         # Build prompt and call LLM
-        user_prompt = build_user_prompt(parent, inspirations)
+        user_prompt = build_user_prompt(
+            parent, inspirations, map_elites_context=me_context
+        )
         print("calling LLM...", end="", flush=True)
 
         cand_id = None
@@ -622,6 +815,13 @@ def main() -> None:
             if m:
                 desc = m.group(1)
 
+        # Compute cell assignment if MAP-Elites is active
+        cell = None
+        if map_elites_active and fitness is not None:
+            cell = candidate_cell(
+                {"objectives": objectives, "fitness": fitness}, thresholds
+            )
+
         candidate = {
             "id": cand_id,
             "generation": gen,
@@ -634,6 +834,7 @@ def main() -> None:
             "objectives": objectives,
             "violations": result.get("violations"),
             "fitness": fitness,
+            "cell": list(cell) if cell else None,
             "timestamp_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
             "model": args.model,
             "score_json_path": str(score_dir / "score.json"),
@@ -645,7 +846,8 @@ def main() -> None:
         if fitness is not None and parent.get("fitness") is not None:
             diff = fitness - parent["fitness"]
             delta = f"  ({'+' if diff >= 0 else ''}{diff:.4f})"
-        print(f"  {verdict}  fitness={fitness}{delta}  ({score_seconds:.0f}s)")
+        cell_str = f"  cell={tuple(cell)}" if cell else ""
+        print(f"  {verdict}  fitness={fitness}{delta}{cell_str}  ({score_seconds:.0f}s)")
 
     # -- summary ---------------------------------------------------------- #
     print()
@@ -658,6 +860,7 @@ def main() -> None:
         "budget_usd": args.budget,
         "model": args.model,
         "generations": args.generations,
+        "seed_generations": args.seed_generations,
         "total_candidates": len(candidates),
         "feasible_count": sum(1 for c in candidates if c.get("fitness") is not None),
         "best_id": best["id"] if best else None,
@@ -669,6 +872,26 @@ def main() -> None:
             for c in candidates
         ],
     }
+
+    # MAP-Elites grid state
+    if map_elites_active:
+        grid = build_grid(candidates, thresholds)
+        total_cells = 2 ** len(MAP_AXES)
+        summary["map_elites"] = {
+            "thresholds": thresholds,
+            "axes": [name for name, _ in MAP_AXES],
+            "occupied_cells": len(grid),
+            "total_cells": total_cells,
+            "grid": {
+                str(cell): {
+                    "fitness": champ["fitness"],
+                    "id": champ["id"],
+                    "policy_name": champ.get("policy_name"),
+                }
+                for cell, champ in sorted(grid.items())
+            },
+        }
+
     (run_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
@@ -688,6 +911,24 @@ def main() -> None:
         print(f"\n-> {best_path}")
     else:
         print("no feasible policy found")
+
+    # MAP-Elites grid printout and champion export
+    if map_elites_active:
+        grid = build_grid(candidates, thresholds)
+        total_cells = 2 ** len(MAP_AXES)
+        print(f"\nMAP-Elites grid: {len(grid)}/{total_cells} cells occupied")
+        for cell in sorted(grid):
+            champ = grid[cell]
+            print(f"  {cell}: fitness={champ['fitness']:.4f}  "
+                  f"{champ.get('policy_name', '?')}")
+
+        champ_dir = run_dir / "grid_champions"
+        champ_dir.mkdir(exist_ok=True)
+        for cell, champ in grid.items():
+            cell_str = "_".join(str(b) for b in cell)
+            champ_path = champ_dir / f"cell_{cell_str}.py"
+            champ_path.write_text(champ["code"], encoding="utf-8")
+        print(f"-> {champ_dir}/")
 
     print(f"-> {run_dir / 'summary.json'}")
 
