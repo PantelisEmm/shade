@@ -141,6 +141,56 @@ summary in `runs/_baseline_cache/` per weather window. A policy that only change
 albedo or land cover reuses both and scores in seconds; one that plants trees or
 raises canopies has changed the shadow geometry and pays for a fresh `prepare`.
 
+## Costs and budget
+
+Unit costs in `config/interventions.json` are drawn from **Klimaat Consulting,
+Appendix 3 to *Heat Resilience Solutions for Boston* (2022)**, the city's own cost
+schedule for heat interventions. Key figures (converted to metric where needed):
+
+| Intervention | Cost | Source detail |
+| --- | --- | --- |
+| Cool pavement (reflective road coating) | **$22.28/m²** | $190.12/linear foot for 28 ft width; StreetBond, 3 applications + friction coat |
+| Cool roof (painted, temporary) | **$69.97/m²** | $6.50/SF |
+| Green roof | **$376.74/m²** | $35.00/SF |
+| Depave to grass | **$90.00/m²** | No Klimaat figure; order-of-magnitude estimate retained |
+| Small street tree | **$2,024/tree** | $2,023.70; 3-inch caliper, no drainage box; includes excavation, bioretention soil mix |
+| Medium street tree | **$6,687/tree** | $6,687.33; 3-inch caliper with drainage box; includes excavation and installation |
+| Shade canopy (fabric awning) | **$1,055/m²** | $98/SF; light gauge steel frame, 50×20 ft; includes spread footings, LED lighting |
+| Solar PV canopy | **$2,150/m²** | $155.40/SF prefab metal canopy + ~$475/m² for integrated PV (estimate) |
+
+Tree maintenance is an additional **$896/tree/year** (Klimaat Appendix 3: pruning
+every 6–10 years, storm damage, insect/disease treatment every 5 years, end-of-life
+removal; excludes salaries, equipment, supplies, and admin). Maintenance is not
+currently modeled in scoring.
+
+### The $500,000 per-neighborhood budget
+
+The default `--budget 500000` is the per-AOI allocation for a single Main Streets
+district (1 km²). It is grounded in two independent estimates:
+
+**Bottom-up from Klimaat unit costs.** A representative Cool Main Streets corridor
+treatment — 100 street trees, 500 lf of fabric canopies, 1,000 lf of cool pavement,
+and 10,000 SF of incentivized cool roofs — totals roughly **$585,000–$654,000**.
+
+**Top-down from actual city spending.**
+- The **$11.4M USFS Urban and Community Forestry grant** Boston secured for tree
+  planting and canopy expansion, divided across 20 Main Streets districts, is
+  **$570,000/district** (trees alone, likely multi-year).
+- The **Boston Tree Alliance Program** distributed **$519,750** to 6 community
+  organizations for 239 trees in its 2026 round, implying ~$2,175/tree — closely
+  matching Klimaat's $2,024 figure. The Four Corners Main Streets district (one of the
+  20 SHADE AOIs) received $50,000 for 40 trees in a single grant round.
+- **9% of the FY27–31 Capital Plan** ($4.4B total) goes to Parks & Resilience, or
+  ~$80M/year. If 5–10% of that is heat-specific streetscape work, that is
+  **$200,000–$400,000 per Main Streets district per year**.
+
+The MVP Action Grant that funded the Klimaat study itself was $280,070 across 5 focus
+neighborhoods (Roxbury, Dorchester, Mattapan, Chinatown, East Boston) — but that paid
+for planning, not implementation.
+
+A full 20-district program at $500K each over 5 years totals **$10M**, which sits
+comfortably within the USFS grant and the Parks & Resilience capital envelope.
+
 ## Working together
 
 - Branch off `main` and open a pull request rather than pushing to `main` directly.

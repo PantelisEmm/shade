@@ -8,7 +8,7 @@ evolutionary code search, but synchronous and single-machine.
     python scripts/evolve.py --generations 2 --aoi chinatown
 
     # different budget and model
-    python scripts/evolve.py --generations 5 --budget 1000000 --model gemini-2.0-flash
+    python scripts/evolve.py --generations 5 --budget 1000000 --model claude-sonnet-4-6
 
 The seed policy (default: policies/baseline_policy.py) is scored first as
 generation 0.  Each subsequent generation picks the best-scoring candidate
@@ -51,40 +51,47 @@ MAP_AXES = [
 
 # ── LLM interface ──────────────────────────────────────────────────────── #
 
-_genai_configured = False
+_anthropic_client = None
 
 
-def generate(prompt: str, system: str, *, model: str = "gemini-3.6-flash") -> str:
+def generate(prompt: str, system: str, *, model: str = "claude-sonnet-4-6") -> str:
     """Call the LLM and return the response text.
 
-    Lazy-imports google.generativeai so the rest of the file can be used
-    without the SDK installed.  To swap to Anthropic later, change only
-    this function body.
+    Uses the Anthropic API (set ANTHROPIC_API_KEY in your environment).
     """
-    global _genai_configured
-    import google.generativeai as genai  # noqa: E402
+    global _anthropic_client
+    import anthropic  # noqa: E402
 
-    if not _genai_configured:
-        key = os.environ.get("GEMINI_API_KEY")
+    if _anthropic_client is None:
+        key = os.environ.get("ANTHROPIC_API_KEY")
         if not key:
             raise SystemExit(
-                "set GEMINI_API_KEY in your environment "
-                "(see https://console.cloud.google.com/apis/credentials)"
+                "set ANTHROPIC_API_KEY in your environment "
+                "(see https://console.anthropic.com/settings/keys)"
             )
-        genai.configure(api_key=key)
-        _genai_configured = True
-
-    llm = genai.GenerativeModel(model, system_instruction=system)
+        base_url = os.environ.get("ANTHROPIC_BASE_URL")
+        kwargs = {"api_key": key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _anthropic_client = anthropic.Anthropic(**kwargs)
 
     last_err = None
     for attempt in range(4):
         try:
-            response = llm.generate_content(prompt)
-            return response.text
+            response = _anthropic_client.messages.create(
+                model=model,
+                max_tokens=16384,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=600.0,
+            )
+            if not response.content:
+                raise RuntimeError("LLM returned empty response")
+            return response.content[0].text
         except Exception as exc:
             last_err = exc
             err_name = type(exc).__name__
-            if "ResourceExhausted" in err_name or "ServiceUnavailable" in err_name:
+            if "RateLimitError" in err_name or "OverloadedError" in err_name:
                 wait = 2 ** (attempt + 1)
                 print(f"  LLM rate-limited ({err_name}), retrying in {wait}s...")
                 time.sleep(wait)
@@ -247,9 +254,9 @@ simulation. The auditor reports the violation strings.
 
 ## Output format
 
-Write the COMPLETE Python module. Start with imports, then POLICY_NAME,
-DESCRIPTION, helper functions if needed, then def plan(). The module must
-be fully self-contained and runnable.
+Write the COMPLETE Python module inside a ```python code fence. Start with
+imports, then POLICY_NAME, DESCRIPTION, helper functions if needed, then
+def plan(). The module must be fully self-contained and runnable.
 """
 
 
@@ -726,8 +733,8 @@ def main() -> None:
                      help="USD per AOI (default 500000)")
     ap.add_argument("--aois", default="chinatown",
                      help="comma-separated AOI names (default chinatown)")
-    ap.add_argument("--model", default="gemini-3.6-flash",
-                     help="LLM model identifier (default gemini-3.6-flash)")
+    ap.add_argument("--model", default="claude-sonnet-4-6",
+                     help="LLM model identifier (default claude-sonnet-4-6)")
     ap.add_argument("--seed-policy", default="policies/baseline_policy.py",
                      help="path to the seed policy (default policies/baseline_policy.py)")
     ap.add_argument("--scenarios", default="baseline",
