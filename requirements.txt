@@ -21,4 +21,4 @@ scipy
 tqdm
 xarray
 solweig
-google-generativeai
+anthropic
