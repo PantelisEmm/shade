@@ -731,8 +731,8 @@ def main() -> None:
                      help="number of LLM evolution iterations (default 10)")
     ap.add_argument("--budget", type=float, default=500_000.0,
                      help="USD per AOI (default 500000)")
-    ap.add_argument("--aois", default="chinatown",
-                     help="comma-separated AOI names (default chinatown)")
+    ap.add_argument("--aois", default="chinatown,brighton,grove_hall",
+                     help="comma-separated AOI names (default chinatown,brighton,grove_hall)")
     ap.add_argument("--model", default="claude-sonnet-4-6",
                      help="LLM model identifier (default claude-sonnet-4-6)")
     ap.add_argument("--seed-policy", default="policies/baseline_policy.py",

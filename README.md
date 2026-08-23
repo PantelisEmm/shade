@@ -191,6 +191,44 @@ for planning, not implementation.
 A full 20-district program at $500K each over 5 years totals **$10M**, which sits
 comfortably within the USFS grant and the Parks & Resilience capital envelope.
 
+## Evolution harness
+
+`scripts/evolve.py` runs the LLM-driven policy search. It prompts an LLM to write
+improved policies as executable Python, scores each candidate against SOLWEIG, and
+iterates using MAP-Elites to maintain diverse strategies across a 4D behavioral grid.
+
+```bash
+python scripts/evolve.py --generations 10 --seed-generations 3
+python scripts/evolve.py --generations 10 --aois chinatown,brighton,grove_hall
+python scripts/evolve.py --model claude-sonnet-4-6 --budget 500000
+```
+
+### Default scoring AOIs
+
+The default `--aois` scores every candidate on **3 AOIs in parallel**: Chinatown,
+Brighton, and Grove Hall. These were selected from the 15 training AOIs to maximize
+diversity across the dimensions that drive policy differentiation:
+
+- **Chinatown** — the dense-urban extreme. Highest building coverage (42.7%),
+  tallest buildings (95th percentile 98 m), lowest canopy (8.5%), and highest UHI
+  intensity (5.87 °C). Represents the downtown high-rise challenge where shade
+  structures and cool roofs matter more than tree planting.
+- **Brighton** — the green-suburban extreme. Highest canopy (32%), lowest paved
+  share (29.8%), most grass (15.9%), and low UHI (1.94 °C). Represents the leafy,
+  lower-density neighborhoods where tree planting has abundant space. Also the
+  lowest POC share (31.6%) and low poverty rate, providing demographic contrast.
+- **Grove Hall** — the high-vulnerability middle. Highest POC share of all 15 AOIs
+  (98.3%), highest low-income share (51.6%), moderate density and canopy, moderate
+  UHI (2.90 °C). Represents the Roxbury/Dorchester corridor where equity-weighted
+  policies must prove themselves.
+
+Together they span the full range of canopy cover (8.5–32%), building height
+(10.9–98.1 m), UHI intensity (1.94–5.87 °C), racial composition (31.6–98.3% POC),
+and income (23.7–51.6% low-income). Geographically they form a triangle: Brighton
+in the northwest, Chinatown in the northeast (downtown), Grove Hall in the
+central-south. The 12 remaining training AOIs are distributed around and between
+these anchors; final validation uses all 15 training AOIs plus the 5 held-out AOIs.
+
 ## Working together
 
 - Branch off `main` and open a pull request rather than pushing to `main` directly.
