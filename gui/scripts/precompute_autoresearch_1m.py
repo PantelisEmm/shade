@@ -45,6 +45,15 @@ MASK_TO_ACTION = {
     "solar_canopy": "solar_canopy",
 }
 
+MASK_TO_SNAPSHOT = {
+    "reflective_pavement": "reflective_snapshot",
+    "cool_roof": "cool_roof_snapshot",
+    "green_roof": "green_roof_snapshot",
+    "depaved_pavement": "depaved_pavement_snapshot",
+    "shade_canopy": "shade_canopy_snapshot",
+    "solar_canopy": "solar_canopy_snapshot",
+}
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -84,6 +93,45 @@ def placements_from_layout(layout: dict) -> list[Placement]:
         if rows.size:
             placements.append(Placement(action, rows, cols))
     return placements
+
+
+def normalize_layout_to_results(layout: dict, results: list[dict]) -> dict[str, dict[str, int]]:
+    """Make the browser layout describe the footprint SOLWEIG actually used.
+
+    The runner clips raster requests against authoritative placement masks and
+    records that exact mask in every result.  An archive must expose the same
+    footprint or the browser correctly treats its map as belonging to another
+    design.  Results for different hours must agree because weather cannot
+    change intervention geometry.
+    """
+    changes: dict[str, dict[str, int]] = {}
+    interventions = layout.setdefault("interventions", {})
+    for request_key, snapshot_key in MASK_TO_SNAPSHOT.items():
+        snapshots = [result.get(snapshot_key) for result in results]
+        snapshots = [snapshot for snapshot in snapshots if isinstance(snapshot, dict)]
+        if not snapshots:
+            continue
+        signatures = {str(snapshot.get("data", "")) for snapshot in snapshots}
+        if len(signatures) != 1:
+            raise ValueError(f"{request_key} footprint differs between archived simulation hours")
+        snapshot = snapshots[0]
+        current = interventions.get(request_key) or {}
+        if current.get("data") == snapshot.get("data"):
+            continue
+        before = int(current.get("count", 0))
+        after = int(snapshot.get("count", 0))
+        interventions[request_key] = {
+            "width": int(snapshot["width"]),
+            "height": int(snapshot["height"]),
+            "count": after,
+            "data": str(snapshot["data"]),
+        }
+        changes[request_key] = {
+            "before_pixels": before,
+            "after_pixels": after,
+            "removed_pixels": max(before - after, 0),
+        }
+    return changes
 
 
 def request_for(layout: dict, run_id: str, aoi: str, scenario: str, hour: int) -> dict:
@@ -252,13 +300,11 @@ def score_candidate(archive_dir: Path, iteration: dict, aois: list[str], hours: 
         layout_path = archive_dir / iteration["layout_files"][aoi]
         layout = json.loads(layout_path.read_text(encoding="utf-8"))
         ctx = load_context(ROOT / "data" / "aoi" / aoi)
-        placements = placements_from_layout(layout)
-        applied = apply_placements(ctx, placements)
-        total, by_action, counts = price(ctx, placements)
-        spend = {"total_usd": total, "by_action_usd": by_action, "by_action_units": counts}
         hourly_baselines, hourly_interventions = [], []
+        hourly_results = []
         for hour in hours:
             result = simulate(layout, candidate_id, aoi, scenario, hour, log)
+            hourly_results.append(result)
             relative = Path("simulations") / candidate_id / aoi / f"{scenario}_{hour}.json"
             atomic_json(archive_dir / relative, result)
             simulation_files.setdefault(aoi, {}).setdefault(scenario, {})[str(hour)] = relative.as_posix()
@@ -266,6 +312,14 @@ def score_candidate(archive_dir: Path, iteration: dict, aois: list[str], hours: 
             hourly_baselines.append(baseline)
             hourly_interventions.append(intervention)
             print(f"    {aoi} {hour}:00 map ready", flush=True)
+        normalization = normalize_layout_to_results(layout, hourly_results)
+        if normalization:
+            atomic_json(layout_path, layout)
+            iteration.setdefault("layout_normalization", {})[aoi] = normalization
+        placements = placements_from_layout(layout)
+        applied = apply_placements(ctx, placements)
+        total, by_action, counts = price(ctx, placements)
+        spend = {"total_usd": total, "by_action_usd": by_action, "by_action_units": counts}
         shape = hourly_baselines[0]["utci"].shape
         base = {
             "utci": np.mean([item["utci"] for item in hourly_baselines], axis=0),
@@ -327,8 +381,13 @@ def main() -> None:
     parser.add_argument("--scenario", default="baseline")
     parser.add_argument("--hours", default="10,13,16")
     parser.add_argument("--limit", type=int, help="Process at most N not-yet-scored candidates")
+    parser.add_argument("--candidate", help="Process only this archived candidate id")
     parser.add_argument("--workers", type=int, default=1, help="Candidates to simulate concurrently (default: 1)")
     parser.add_argument("--rayon-threads", type=int, help="Rust ray-tracing threads available to each worker")
+    parser.add_argument(
+        "--repair-existing", action="store_true",
+        help="Reconcile and rescore every archived layout from its completed simulation snapshots",
+    )
     args = parser.parse_args()
     if args.rayon_threads is not None:
         if args.rayon_threads < 1:
@@ -341,11 +400,15 @@ def main() -> None:
     aois = [str(aoi) for aoi in archive["run"]["aois"]]
     prepare_archive(archive)
     atomic_json(archive_path, archive)
-    pending = [
+    pending = list(archive["iterations"]) if args.repair_existing else [
         iteration for iteration in archive["iterations"]
         if iteration.get("score_resolution_m") != 1
         or iteration.get("score_physics_version") != gui_solweig.PHYSICS_VERSION
     ]
+    if args.candidate:
+        pending = [iteration for iteration in pending if str(iteration["id"]) == args.candidate]
+        if not pending:
+            parser.error(f"candidate {args.candidate!r} is not available for processing")
     if args.limit is not None:
         pending = pending[:args.limit]
     log_path = archive_dir / "precompute_1m.log"

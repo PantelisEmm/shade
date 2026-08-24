@@ -12,13 +12,67 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
+GUI_SCRIPTS = ROOT / "gui" / "scripts"
+for directory in (SCRIPTS, GUI_SCRIPTS):
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
 
 from evolve import export_candidate_artifacts, policy_metadata, refresh_archive, save_candidate  # noqa: E402
+from import_git_results import normalize_legacy_canopy_landcover, packed_mask  # noqa: E402
+from policy_api import Placement  # noqa: E402
+from precompute_autoresearch_1m import normalize_layout_to_results  # noqa: E402
 
 
 class AutoresearchArchiveTests(unittest.TestCase):
+    def test_archived_layout_is_normalized_to_the_simulated_footprint(self):
+        requested = np.array([[True, True], [False, False]])
+        simulated = np.array([[True, False], [False, False]])
+        empty = np.zeros((2, 2), dtype=bool)
+        layout = {
+            "interventions": {
+                "shade_canopy": packed_mask(requested),
+                **{
+                    key: packed_mask(empty)
+                    for key in (
+                        "reflective_pavement", "cool_roof", "green_roof",
+                        "depaved_pavement", "solar_canopy",
+                    )
+                },
+            },
+        }
+        result = {
+            "shade_canopy_snapshot": packed_mask(simulated),
+            "reflective_snapshot": packed_mask(empty),
+            "cool_roof_snapshot": packed_mask(empty),
+            "green_roof_snapshot": packed_mask(empty),
+            "depaved_pavement_snapshot": packed_mask(empty),
+            "solar_canopy_snapshot": packed_mask(empty),
+        }
+
+        changes = normalize_layout_to_results(layout, [result, result])
+
+        self.assertEqual(changes["shade_canopy"]["removed_pixels"], 1)
+        self.assertEqual(layout["interventions"]["shade_canopy"]["data"], result["shade_canopy_snapshot"]["data"])
+
+    def test_legacy_import_only_filters_canopy_landcover(self):
+        class Context:
+            shape = (2, 2)
+
+            @staticmethod
+            def eligible(action):
+                self = np.zeros((2, 2), dtype=bool)
+                self[0, 0] = True
+                return self
+
+        canopy = Placement("shade_canopy", [0, 0], [0, 1])
+        tree = Placement("tree_medium", [0, 0], [0, 1])
+
+        normalized, removed = normalize_legacy_canopy_landcover(Context(), [canopy, tree])
+
+        self.assertEqual(removed, {"shade_canopy": 1})
+        self.assertEqual(len(normalized[0]), 1)
+        self.assertEqual(len(normalized[1]), 2)
+
     def test_policy_metadata_preserves_multiline_description(self):
         name, description = policy_metadata('''
 POLICY_NAME = "Corridor shade"

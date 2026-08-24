@@ -23,7 +23,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from policy_api import load_context, normalise_placements  # noqa: E402
+from policy_api import Placement, load_context, normalise_placements  # noqa: E402
 from score_policy import audit  # noqa: E402
 
 
@@ -67,7 +67,35 @@ def load_policy(candidate: dict) -> types.ModuleType:
     return module
 
 
-def build_layout(candidate_id: str, aoi: str, ctx, placements: list) -> dict:
+def normalize_legacy_canopy_landcover(ctx, placements: list[Placement]) -> tuple[list[Placement], dict[str, int]]:
+    """Adapt archived policies made before canopies became pavement-only.
+
+    Only land-cover eligibility is normalized here.  Siting, overlap, duplicate,
+    bounds, and budget errors remain intact for the authoritative audit below.
+    """
+    normalized: list[Placement] = []
+    removed: dict[str, int] = {}
+    rows_n, cols_n = ctx.shape
+    for placement in placements:
+        if placement.action not in ("shade_canopy", "solar_canopy"):
+            normalized.append(placement)
+            continue
+        in_bounds = (
+            (placement.rows >= 0) & (placement.rows < rows_n)
+            & (placement.cols >= 0) & (placement.cols < cols_n)
+        )
+        if not in_bounds.all():
+            normalized.append(placement)
+            continue
+        keep = ctx.eligible(placement.action)[placement.rows, placement.cols]
+        count = int((~keep).sum())
+        normalized.append(Placement(placement.action, placement.rows[keep], placement.cols[keep]))
+        if count:
+            removed[placement.action] = count
+    return normalized, removed
+
+
+def build_layout(candidate_id: str, aoi: str, ctx, placements: list, normalized_pixels: dict[str, int] | None = None) -> dict:
     masks = {
         request_key: np.zeros(ctx.shape, dtype=bool)
         for request_key in GUI_MASK_ACTIONS.values()
@@ -92,7 +120,7 @@ def build_layout(candidate_id: str, aoi: str, ctx, placements: list) -> dict:
             masks[GUI_MASK_ACTIONS[placement.action]][placement.rows, placement.cols] = True
         else:
             raise ValueError(f"{candidate_id} uses unsupported action {placement.action!r}")
-    return {
+    layout = {
         "schema_version": 1,
         "candidate_id": candidate_id,
         "aoi": aoi,
@@ -104,6 +132,12 @@ def build_layout(candidate_id: str, aoi: str, ctx, placements: list) -> dict:
             request_key: packed_mask(mask) for request_key, mask in masks.items()
         },
     }
+    if normalized_pixels:
+        layout["normalization"] = {
+            "contract": "pavement-only-canopies-v1",
+            "removed_pixels": normalized_pixels,
+        }
+    return layout
 
 
 def import_results(source: Path, output: Path, *, limit: int | None = None) -> dict:
@@ -128,11 +162,12 @@ def import_results(source: Path, output: Path, *, limit: int | None = None) -> d
             candidate_id = str(candidate["id"])
             module = load_policy(candidate)
             placements = normalise_placements(module.plan(ctx, budget))
+            placements, normalized_pixels = normalize_legacy_canopy_landcover(ctx, placements)
             problems, _ = audit(ctx, placements, budget)
             if problems:
                 joined = "; ".join(problems)
                 raise RuntimeError(f"{candidate_id} is no longer feasible on {aoi}: {joined}")
-            layout = build_layout(candidate_id, aoi, ctx, placements)
+            layout = build_layout(candidate_id, aoi, ctx, placements, normalized_pixels)
             relative = Path("layouts") / candidate_id / f"{aoi}.json"
             atomic_json(output / relative, layout)
             layout_files[candidate_id][aoi] = relative.as_posix()

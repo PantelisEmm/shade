@@ -642,16 +642,24 @@ def main() -> None:
             depaved_mask &= depavable
             depaved_snapshot = encode_raster_mask(depaved_mask)
             depaved_snapshot["clipped_invalid_pixels"] = invalid_depaved_pixels
+        shade_eligibility_path = GUI_ROOT / "public" / "data" / AOI_NAME / "placeable_shade_canopy.png"
+        solar_eligibility_path = GUI_ROOT / "public" / "data" / AOI_NAME / "placeable_solar_canopy.png"
+        if not shade_eligibility_path.exists() or not solar_eligibility_path.exists():
+            raise FileNotFoundError("Missing offline canopy eligibility masks; export the GUI layers first")
+        shade_placeable = np.asarray(Image.open(shade_eligibility_path).convert("L")) >= 128
+        solar_placeable = np.asarray(Image.open(solar_eligibility_path).convert("L")) >= 128
+        if shade_placeable.shape != aoi_shape or solar_placeable.shape != aoi_shape:
+            raise ValueError("Canopy eligibility masks are not aligned with the AOI")
         shade_canopy_mask, shade_canopy_snapshot = decode_raster_mask(request.get("shade_canopy"), aoi_shape, "Shade canopy")
-        invalid_shade_canopy_pixels = int(np.count_nonzero(shade_canopy_mask & ~depavable))
+        invalid_shade_canopy_pixels = int(np.count_nonzero(shade_canopy_mask & ~shade_placeable))
         if invalid_shade_canopy_pixels:
-            shade_canopy_mask &= depavable
+            shade_canopy_mask &= shade_placeable
             shade_canopy_snapshot = encode_raster_mask(shade_canopy_mask)
             shade_canopy_snapshot["clipped_invalid_pixels"] = invalid_shade_canopy_pixels
         solar_canopy_mask, solar_canopy_snapshot = decode_raster_mask(request.get("solar_canopy"), aoi_shape, "Solar canopy")
-        invalid_solar_canopy_pixels = int(np.count_nonzero(solar_canopy_mask & ~depavable))
+        invalid_solar_canopy_pixels = int(np.count_nonzero(solar_canopy_mask & ~solar_placeable))
         if invalid_solar_canopy_pixels:
-            solar_canopy_mask &= depavable
+            solar_canopy_mask &= solar_placeable
             solar_canopy_snapshot = encode_raster_mask(solar_canopy_mask)
             solar_canopy_snapshot["clipped_invalid_pixels"] = invalid_solar_canopy_pixels
         cool_roof_mask, cool_roof_snapshot = decode_raster_mask(request.get("cool_roof"), aoi_shape, "Cool roof")

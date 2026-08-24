@@ -384,7 +384,11 @@ def load_context(aoi_dir: Path) -> PlanningContext:
     # what a policy reaches for first. Land-cover eligibility is folded in so a
     # policy that trusts them cannot fail the audit on either count.
     plantable = np.isin(lc, (PAVED, GRASS, BARE)) & sit.allowed("tree_medium")
-    buildable = np.isin(lc, list(GROUND_CODES)) & sit.allowed("shade_canopy")
+    # Canopies are sidewalk/pavement assets in both the policy contract and the
+    # GUI.  Keeping this shortcut identical to ``placeable('shade_canopy')``
+    # prevents a policy from proposing grass pixels that the physical runner
+    # would later have to remove.
+    buildable = (lc == PAVED) & sit.allowed("shade_canopy")
 
     return PlanningContext(
         name=name,

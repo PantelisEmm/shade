@@ -333,10 +333,6 @@ def export(aoi: str, resolution: float) -> None:
     editor_placeable_counts: dict[str, int] = {}
     for action in ("tree_small", "tree_medium", "light_road", "grass_conversion", "shade_canopy", "solar_canopy"):
         mask = placeable[action]
-        # The studio's canopy interventions are sidewalk/pavement assets.  This
-        # is stricter than the policy contract (and therefore remains feasible).
-        if action in ("shade_canopy", "solar_canopy"):
-            mask = mask & (landcover == 1)
         save_mask(target / f"placeable_{action}.png", mask)
         editor_placeable_counts[action] = int(mask.sum())
 
