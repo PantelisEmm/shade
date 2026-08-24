@@ -3,7 +3,8 @@
 The GeoTIFFs in ``data/aoi`` remain the scientific source of truth. This script
 creates lightweight display products under ``gui/public/data`` for the local GUI.
 
-    .venv/bin/python gui/scripts/export_gui_layers.py --aoi chinatown
+    .venv/bin/python gui/scripts/export_gui_layers.py --aoi chinatown --res 1
+    .venv/bin/python gui/scripts/export_gui_layers.py --all --res 1
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import geopandas as gpd
 import numpy as np
@@ -23,6 +25,31 @@ from shapely.geometry import box
 
 GUI_ROOT = Path(__file__).resolve().parents[1]
 ROOT = GUI_ROOT.parent
+CONFIG = ROOT / "config"
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+import siting  # noqa: E402
+
+GROUND_CODES = (1, 3, 4, 5, 6)
+
+
+def load_aoi_config() -> dict:
+    return json.loads((CONFIG / "aois.json").read_text(encoding="utf-8"))["aois"]
+
+
+def source_directory(aoi: str, resolution: float) -> Path:
+    """Find a built AOI by its metadata rather than assuming a suffix scheme."""
+    candidates = [ROOT / "data" / "aoi" / aoi, ROOT / "data" / "aoi" / f"{aoi}_{resolution:g}m"]
+    for candidate in candidates:
+        metadata_path = candidate / "aoi.json"
+        if not metadata_path.exists():
+            continue
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if abs(float(metadata["resolution_m"]) - resolution) < 1e-9:
+            return candidate
+    raise FileNotFoundError(f"No {resolution:g} m build found for {aoi}")
 
 def read(path: Path) -> tuple[np.ndarray, dict]:
     with rasterio.open(path) as src:
@@ -39,6 +66,31 @@ def colorize(values: np.ndarray, stops: list[tuple[float, tuple[int, int, int]]]
 
 def save_rgba(path: Path, rgba: np.ndarray) -> None:
     Image.fromarray(rgba.astype("uint8"), "RGBA").save(path, optimize=True)
+
+
+def save_mask(path: Path, mask: np.ndarray) -> None:
+    """Write a boolean policy mask in the format consumed by the browser."""
+    Image.fromarray(mask.astype("uint8") * 255, "L").save(path, optimize=True)
+
+
+def action_placeable_masks(
+    landcover: np.ndarray,
+    siting_masks: "siting.SitingMasks",
+) -> dict[str, np.ndarray]:
+    """Mirror ``PlanningContext.placeable`` without loading scoring demographics.
+
+    These files are the editor's feasibility contract.  Keeping the land-cover
+    eligibility and ``config/siting.json`` rules together here prevents the GUI
+    from offering pixels that the scorer will reject later.
+    """
+    interventions = json.loads(
+        (CONFIG / "interventions.json").read_text(encoding="utf-8")
+    )["interventions"]
+    masks: dict[str, np.ndarray] = {}
+    for action, spec in interventions.items():
+        codes = spec.get("applies_to_landcover") or GROUND_CODES
+        masks[action] = np.isin(landcover, list(codes)) & siting_masks.allowed(action)
+    return masks
 
 
 def export_street_segments(path: Path, streets: gpd.GeoDataFrame, bbox: list[float], resolution: float) -> int:
@@ -127,7 +179,8 @@ def export_roof_regions(
     buildings: gpd.GeoDataFrame,
     landcover: np.ndarray,
     transform,
-) -> tuple[int, int]:
+    placeable: np.ndarray,
+) -> tuple[int, int, int]:
     """Encode selectable whole-building roof IDs as 24-bit RGB pixels."""
     regions = rasterize(
         (
@@ -155,13 +208,25 @@ def export_roof_regions(
         missing_labels[missing_labels > 0] += len(buildings)
         regions[missing] = missing_labels[missing]
 
+    # Roof tools operate on whole buildings.  If even one pixel of a building
+    # falls in a design-review exclusion, remove the complete region from the
+    # selection image so a click/brush can never create a partial illegal roof.
+    invalid_region_ids = np.unique(regions[(regions > 0) & ~placeable])
+    if invalid_region_ids.size:
+        regions[np.isin(regions, invalid_region_ids)] = 0
+
     rgba = np.zeros((*landcover.shape, 4), dtype="uint8")
     rgba[..., 0] = regions & 255
     rgba[..., 1] = (regions >> 8) & 255
     rgba[..., 2] = (regions >> 16) & 255
     rgba[..., 3] = np.where(regions > 0, 255, 0).astype("uint8")
     save_rgba(path, rgba)
-    return int(np.unique(regions[regions > 0]).size), int(building_pixels.sum())
+    eligible_pixels = int((regions > 0).sum())
+    return (
+        int(np.unique(regions[regions > 0]).size),
+        eligible_pixels,
+        int(building_pixels.sum()) - eligible_pixels,
+    )
 
 
 def read_local_vectors(bbox: list[float]) -> dict[str, gpd.GeoDataFrame]:
@@ -225,8 +290,8 @@ def render_vector_base(
     return base
 
 
-def export(aoi: str) -> None:
-    source = ROOT / "data" / "aoi" / aoi
+def export(aoi: str, resolution: float) -> None:
+    source = source_directory(aoi, resolution)
     target = GUI_ROOT / "public" / "data" / aoi
     target.mkdir(parents=True, exist_ok=True)
 
@@ -235,6 +300,18 @@ def export(aoi: str) -> None:
     cdsm, _ = read(source / "cdsm.tif")
     heat, _ = read(source / "heat_ta3pm.tif")
     metadata = json.loads((source / "aoi.json").read_text())
+    intervention_menu = json.loads(
+        (CONFIG / "interventions.json").read_text(encoding="utf-8")
+    )["interventions"]
+
+    strict_siting = siting.build(
+        tuple(metadata["bbox_26986"]),
+        float(metadata["resolution_m"]),
+        landcover.shape,
+        landcover,
+        np.nan_to_num(cdsm, nan=0.0),
+    )
+    placeable = action_placeable_masks(landcover, strict_siting)
 
     vectors = read_local_vectors(metadata["bbox_26986"])
     base = render_vector_base(vectors, dsm, profile)
@@ -249,25 +326,34 @@ def export(aoi: str) -> None:
     overlay[landcover == 7] = (72, 142, 173, 145)  # water
     save_rgba(target / "landcover.png", overlay)
 
-    # Browser-side placement validation: trees may be placed on pavement and
-    # other open classes, but their crown footprint must not touch a building
-    # or water pixel. A compact 8-bit mask keeps this check fully offline.
-    placement_valid = (~np.isin(landcover, (2, 7)) & (landcover > 0)).astype("uint8") * 255
-    Image.fromarray(placement_valid, "L").save(target / "tree_placement_mask.png", optimize=True)
+    # The physical crown-footprint check is intentionally separate from the
+    # policy-valid centre pixels.  A tree centre must pass both in the browser.
+    physical_tree_footprint = ~np.isin(landcover, (2, 7)) & (landcover > 0)
+    save_mask(target / "tree_placement_mask.png", physical_tree_footprint)
+    editor_placeable_counts: dict[str, int] = {}
+    for action in ("tree_small", "tree_medium", "light_road", "grass_conversion", "shade_canopy", "solar_canopy"):
+        mask = placeable[action]
+        # The studio's canopy interventions are sidewalk/pavement assets.  This
+        # is stricter than the policy contract (and therefore remains feasible).
+        if action in ("shade_canopy", "solar_canopy"):
+            mask = mask & (landcover == 1)
+        save_mask(target / f"placeable_{action}.png", mask)
+        editor_placeable_counts[action] = int(mask.sum())
 
-    pavement_valid = (landcover == 1).astype("uint8") * 255
-    Image.fromarray(pavement_valid, "L").save(target / "pavement_mask.png", optimize=True)
-    depavable_summary = export_depavable_mask(
-        target / "depavable_mask.png",
-        vectors,
-        landcover,
-        profile["transform"],
-    )
-    roof_count, roof_pixel_count = export_roof_regions(
+    # Preserve legacy filenames for old clients while making their contents
+    # authoritative rather than heuristic.
+    save_mask(target / "pavement_mask.png", placeable["light_road"])
+    save_mask(target / "depavable_mask.png", placeable["grass_conversion"])
+    depavable_summary = {
+        "eligible_pixels": int(placeable["grass_conversion"].sum()),
+        "source": "PlanningContext.placeable('grass_conversion')",
+    }
+    roof_count, roof_pixel_count, roof_excluded_pixel_count = export_roof_regions(
         target / "roof_regions.png",
         vectors["buildings"],
         landcover,
         profile["transform"],
+        placeable["cool_roof"] & placeable["green_roof"],
     )
     street_count = export_street_segments(
         target / "street_segments.json",
@@ -340,14 +426,25 @@ def export(aoi: str) -> None:
     screening[..., 3] = np.where(screening_valid, 255, 0).astype("uint8")
     save_rgba(target / "screening_metrics.png", screening)
 
+    aoi_config = load_aoi_config().get(aoi, {})
     manifest = {
         "aoi": aoi,
-        "label": "Chinatown",
+        "label": aoi_config.get("label", aoi.replace("_", " ").title()),
+        "split": aoi_config.get("split", "unknown"),
         "crs": metadata["crs"],
         "bbox": metadata["bbox_26986"],
         "width": int(profile["width"]),
         "height": int(profile["height"]),
         "resolution_m": metadata["resolution_m"],
+        "interventions": {
+            action: {
+                "label": spec["label"],
+                "unit": spec["unit"],
+                "cost_usd_per_unit": spec["cost_usd_per_unit"],
+            }
+            for action, spec in intervention_menu.items()
+        },
+        "source_directory": str(source.relative_to(ROOT)),
         "built_utc": metadata["built_utc"],
         "heat_ta3pm_c": {
             "display_min": round(low, 2),
@@ -372,8 +469,12 @@ def export(aoi: str) -> None:
             "canopy": "canopy.png",
             "heat": "heat_ta3pm.png",
             "tree_placement_mask": "tree_placement_mask.png",
+            "tree_small_placeable_mask": "placeable_tree_small.png",
+            "tree_medium_placeable_mask": "placeable_tree_medium.png",
             "pavement_mask": "pavement_mask.png",
             "depavable_mask": "depavable_mask.png",
+            "shade_canopy_placeable_mask": "placeable_shade_canopy.png",
+            "solar_canopy_placeable_mask": "placeable_solar_canopy.png",
             "street_segments": "street_segments.json",
             "roof_regions": "roof_regions.png",
         },
@@ -383,35 +484,41 @@ def export(aoi: str) -> None:
                 {"file": "data/boston/street_segments_sam.geojson", "features_in_aoi": len(vectors["streets"])},
                 {"file": "data/boston/sidewalk_centerline_geojson.zip", "features_in_aoi": len(vectors["sidewalks"])},
                 {"file": "data/boston/open_space.geojson", "features_in_aoi": len(vectors["open_space"])},
-                {"file": "data/aoi/chinatown/dsm.tif", "use": "building relief only"},
+                {"file": f"{source.relative_to(ROOT)}/dsm.tif", "use": "building relief only"},
             ],
             "landcover": {
-                "file": "data/aoi/chinatown/landcover.tif",
+                "file": f"{source.relative_to(ROOT)}/landcover.tif",
                 "visible_classes": ["pavement", "grass/soil", "water"],
                 "transparent_classes": ["buildings", "canopy"],
             },
             "reflective_pavement": {
-                "placement_mask": "data/aoi/chinatown/landcover.tif class 1",
+                "placement_mask": "PlanningContext.placeable('light_road')",
                 "street_segments": street_count,
             },
             "depaving": {
-                "placement_mask": "data/aoi/chinatown/landcover.tif class 1 outside derived road corridors",
-                "method": "street-class corridor exclusion with mapped sidewalks and paved open-space pixels restored",
-                "limitations": "Boston source files do not provide authoritative road-edge widths or complete parking-lot polygons",
+                "placement_mask": "PlanningContext.placeable('grass_conversion')",
+                "method": "land-cover eligibility plus config/siting.json roadbed and crossing rules",
                 **depavable_summary,
             },
             "cool_roof": {
                 "building_footprints": "data/boston/buildings_roof_breaks_geojson.zip",
-                "eligible_mask": "data/aoi/chinatown/landcover.tif class 2",
+                "eligible_mask": f"{source.relative_to(ROOT)}/landcover.tif class 2",
                 "selectable_roofs": roof_count,
                 "eligible_pixels": roof_pixel_count,
+                "excluded_design_review_or_partial_building_pixels": roof_excluded_pixel_count,
+            },
+            "strict_feasibility": {
+                "rules": "config/siting.json",
+                "policy_placeable_pixels": {action: int(mask.sum()) for action, mask in placeable.items()},
+                "editor_placeable_pixels": editor_placeable_counts,
+                "note": "Every editor mask is PlanningContext.placeable(), or a stricter subset where the studio intentionally limits canopies to pavement and roof tools to whole buildings.",
             },
             "canopy": {
-                "file": "data/aoi/chinatown/cdsm.tif",
+                "file": f"{source.relative_to(ROOT)}/cdsm.tif",
                 "crowns_painted": metadata["cdsm_build"]["crowns_painted"],
             },
             "heat": {
-                "file": "data/aoi/chinatown/heat_ta3pm.tif",
+                "file": f"{source.relative_to(ROOT)}/heat_ta3pm.tif",
                 "source": metadata["sources"]["heat_ta3pm"],
                 "units": "degrees C",
             },
@@ -421,11 +528,82 @@ def export(aoi: str) -> None:
     print(f"exported {aoi} GUI layers -> {target}")
 
 
+def _polygon_paths(geometry, bounds: tuple[float, float, float, float]) -> list[list[list[float]]]:
+    minx, miny, maxx, maxy = bounds
+    scale = 1000.0 / max(maxx - minx, maxy - miny)
+    polygons = list(geometry.geoms) if geometry.geom_type == "MultiPolygon" else [geometry]
+    paths = []
+    for polygon in polygons:
+        coordinates = [
+            [round((x - minx) * scale, 2), round((maxy - y) * scale, 2)]
+            for x, y in polygon.exterior.coords
+        ]
+        if len(coordinates) > 3:
+            paths.append(coordinates)
+    return paths
+
+
+def export_overview(resolution: float) -> None:
+    """Write a compact Boston outline plus selectable configured AOI windows."""
+    neighborhoods = gpd.read_file(ROOT / "data" / "boston" / "neighborhoods.geojson").to_crs("EPSG:26986")
+    name_column = next(column for column in ("name", "Name", "BlockGr202", "neighborhood") if column in neighborhoods.columns)
+    neighborhoods = neighborhoods[[name_column, "geometry"]].copy()
+    neighborhoods["geometry"] = neighborhoods.geometry.simplify(18.0, preserve_topology=True)
+    raw_bounds = tuple(float(value) for value in neighborhoods.total_bounds)
+    pad = 450.0
+    bounds = (raw_bounds[0] - pad, raw_bounds[1] - pad, raw_bounds[2] + pad, raw_bounds[3] + pad)
+    minx, miny, maxx, maxy = bounds
+    scale = 1000.0 / max(maxx - minx, maxy - miny)
+
+    configured = load_aoi_config()
+    areas = []
+    for key, spec in configured.items():
+        bbox = spec["bbox_26986"]
+        manifest_path = GUI_ROOT / "public" / "data" / key / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else None
+        areas.append({
+            "id": key,
+            "label": spec["label"],
+            "split": spec["split"],
+            "resolution_m": manifest.get("resolution_m") if manifest else resolution,
+            "ready": bool(manifest and abs(float(manifest["resolution_m"]) - resolution) < 1e-9),
+            "x": round((bbox[0] - minx) * scale, 2),
+            "y": round((maxy - bbox[3]) * scale, 2),
+            "width": round((bbox[2] - bbox[0]) * scale, 2),
+            "height": round((bbox[3] - bbox[1]) * scale, 2),
+            "heat_min_c": manifest.get("heat_ta3pm_c", {}).get("display_min") if manifest else None,
+            "heat_max_c": manifest.get("heat_ta3pm_c", {}).get("display_max") if manifest else None,
+        })
+
+    payload = {
+        "crs": "EPSG:26986",
+        "resolution_m": resolution,
+        "viewbox": [0, 0, round((maxx - minx) * scale, 2), round((maxy - miny) * scale, 2)],
+        "neighborhoods": [
+            {"name": str(row[name_column]), "paths": _polygon_paths(row.geometry, bounds)}
+            for _, row in neighborhoods.iterrows()
+            if row.geometry is not None and not row.geometry.is_empty
+        ],
+        "areas": areas,
+    }
+    target = GUI_ROOT / "public" / "data" / "study_areas.json"
+    target.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+    print(f"exported Boston study-area overview -> {target}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--aoi", required=True)
+    parser.add_argument("--aoi")
+    parser.add_argument("--all", action="store_true")
+    configured_default = float(json.loads((CONFIG / "aois.json").read_text(encoding="utf-8")).get("default_res_m", 1.0))
+    parser.add_argument("--res", type=float, default=configured_default)
     args = parser.parse_args()
-    export(args.aoi)
+    if not args.aoi and not args.all:
+        parser.error("one of --aoi or --all is required")
+    names = list(load_aoi_config()) if args.all else [args.aoi]
+    for name in names:
+        export(str(name), args.res)
+    export_overview(args.res)
 
 
 if __name__ == "__main__":

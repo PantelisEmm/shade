@@ -31,7 +31,7 @@ PY=~/anaconda3/envs/shade/python.exe
 bash scripts/fetch_boston_open_data.sh       # idempotent; skips what exists
 $PY scripts/make_weather_scenarios.py
 $PY scripts/build_aoi.py --list
-$PY scripts/build_aoi.py --all               # 20 AOIs at the 2 m default, ~4 min
+$PY scripts/build_aoi.py --all               # 20 AOIs at the 1 m default
 $PY scripts/summarise_aois.py
 $PY scripts/smoke_test_solweig.py --aoi dudley_square  # GPU is disabled by default; see §9
 ```
@@ -89,10 +89,10 @@ is both the context a policy prompt should see and the denominator the auditor n
 
 Build all 20 with `--all` (~4 min total), then `python scripts/summarise_aois.py`.
 
-**Resolution convention.** The default is **2 m**, written to `data/aoi/<name>/`. Any
-other pixel size goes to `data/aoi/<name>_<res>m/`. 2 m is used for search and final
-scoring alike; 1 m is a spot-check only — section 9 has the measured cost and the reason
-not to compare across resolutions.
+**Resolution convention.** The default is **1 m**, written to `data/aoi/<name>/`. Any
+other pixel size goes to `data/aoi/<name>_<res>m/`. The shared default is controlled by
+`default_res_m` in `config/aois.json`; section 9 records the measured resolution
+tradeoff and the reason not to compare scores across resolutions.
 
 Each build writes `dsm/dem/cdsm/landcover/dsm_raw` plus the four city heat rasters on one
 grid in **EPSG:26986** (metres — SOLWEIG's shadow geometry needs a metric CRS), and an

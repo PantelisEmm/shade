@@ -14,6 +14,8 @@ type Props = {
   trees: LayerTree[];
   width: number;
   height: number;
+  dataRoot: string;
+  resolutionM: number;
   comparisonActive: boolean;
   afterClipPercent: number;
 };
@@ -32,8 +34,8 @@ const loadImage = (source: string) => {
   return imagePromises.get(source)!;
 };
 
-const crownPath = (context: CanvasRenderingContext2D, tree: LayerTree) => {
-  const radius = Math.max(2.5, tree.crownDiameterM / 2);
+const crownPath = (context: CanvasRenderingContext2D, tree: LayerTree, resolutionM: number) => {
+  const radius = Math.max(1.25, tree.crownDiameterM / (2 * resolutionM));
   const seed = [...tree.id].reduce((sum, character) => sum + character.charCodeAt(0), 0);
   const points = 14;
   context.beginPath();
@@ -48,10 +50,10 @@ const crownPath = (context: CanvasRenderingContext2D, tree: LayerTree) => {
   context.closePath();
 };
 
-const replaceCrownPixels = (context: CanvasRenderingContext2D, tree: LayerTree, color: string) => {
-  const radius = Math.max(3, tree.crownDiameterM / 2 + 1);
+const replaceCrownPixels = (context: CanvasRenderingContext2D, tree: LayerTree, color: string, resolutionM: number) => {
+  const radius = Math.max(1.5, tree.crownDiameterM / (2 * resolutionM) + 1);
   context.save();
-  crownPath(context, tree);
+  crownPath(context, tree, resolutionM);
   context.clip();
   context.clearRect(tree.x - radius, tree.y - radius, radius * 2, radius * 2);
   context.fillStyle = color;
@@ -73,6 +75,8 @@ export default function InterventionMapLayers({
   trees,
   width,
   height,
+  dataRoot,
+  resolutionM,
   comparisonActive,
   afterClipPercent,
 }: Props) {
@@ -84,8 +88,8 @@ export default function InterventionMapLayers({
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      loadImage("/data/chinatown/landcover.png"),
-      loadImage("/data/chinatown/canopy.png"),
+      loadImage(`${dataRoot}/landcover.png`),
+      loadImage(`${dataRoot}/canopy.png`),
     ]).then(([landImage, canopyImage]) => {
       if (cancelled) return;
       const landContext = landAfterRef.current?.getContext("2d");
@@ -93,27 +97,27 @@ export default function InterventionMapLayers({
       if (landContext) {
         landContext.clearRect(0, 0, width, height);
         landContext.drawImage(landImage, 0, 0, width, height);
-        for (const tree of trees) replaceCrownPixels(landContext, tree, `rgba(116, 157, 91, ${120 / 255})`);
+        for (const tree of trees) replaceCrownPixels(landContext, tree, `rgba(116, 157, 91, ${120 / 255})`, resolutionM);
       }
       if (canopyContext) {
         canopyContext.clearRect(0, 0, width, height);
         canopyContext.drawImage(canopyImage, 0, 0, width, height);
-        for (const tree of trees) replaceCrownPixels(canopyContext, tree, canopyColor(tree.heightM));
+        for (const tree of trees) replaceCrownPixels(canopyContext, tree, canopyColor(tree.heightM), resolutionM);
       }
     }).catch(() => {
       // Baseline map layers remain available if an intervention canvas fails.
     });
     return () => { cancelled = true; };
-  }, [showLand, showCanopy, trees, width, height]);
+  }, [showLand, showCanopy, trees, width, height, dataRoot, resolutionM]);
 
   return (
     <div className="intervention-map-layers">
       {showLand && <>
-        <img className="intervention-raster land before" src="/data/chinatown/landcover.png" alt="Baseline land cover" draggable="false" style={{ clipPath: beforeClip }} />
+        <img className="intervention-raster land before" src={`${dataRoot}/landcover.png`} alt="Baseline land cover" draggable="false" style={{ clipPath: beforeClip }} />
         <canvas ref={landAfterRef} className="intervention-raster land after" width={width} height={height} style={{ clipPath: afterClip }} aria-label="Land cover with proposed trees" />
       </>}
       {showCanopy && <>
-        <img className="intervention-raster canopy before" src="/data/chinatown/canopy.png" alt="Baseline tree canopy" draggable="false" style={{ clipPath: beforeClip }} />
+        <img className="intervention-raster canopy before" src={`${dataRoot}/canopy.png`} alt="Baseline tree canopy" draggable="false" style={{ clipPath: beforeClip }} />
         <canvas ref={canopyAfterRef} className="intervention-raster canopy after" width={width} height={height} style={{ clipPath: afterClip }} aria-label="Canopy with proposed trees" />
       </>}
     </div>

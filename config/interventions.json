@@ -1,7 +1,7 @@
 {
   "description": "The cooling actions a SHADE policy is allowed to place, with the physical edit each one makes to the SOLWEIG raster stack and an order-of-magnitude unit cost. The physical parameters are the ones Boston's own heat study used, so a policy evaluated here is being scored against the same assumptions the city planned with. The costs are NOT city figures -- see cost_caveat.",
   "physics_source": "Klimaat Consulting & Innovation, 'Neighbourhood Urban Climate Simulation', Appendix 2 to Heat Resilience Solutions for Boston (2021-09-24), Appendix A layer specifications. Local copy: data/heat/Appendix2_NeighborhoodClimateSimulationModeling.pdf",
-  "cost_caveat": "Unit costs are public order-of-magnitude figures from other cities' programmes and trade sources, carried here so the cost-efficiency objective has a scale to work with. They are the weakest numbers in the stack. Replace them with Boston capital-budget figures before any result is presented as a recommendation.",
+  "cost_caveat": "Unit costs are from Klimaat Consulting, Appendix 3 to Heat Resilience Solutions for Boston (2022), the city's own cost schedule for heat interventions. Shade canopy costs use the fabric awning figure ($98/SF); tree costs use the no-drainage-box figure ($2,024/tree). The $500,000 per-neighborhood budget aligns with a bottom-up corridor estimate (~$585K-$654K) and with the $11.4M USFS urban forestry grant divided across 20 Main Streets districts ($570K/district).",
 
   "baseline_surfaces": {
     "base_layer": {"material": "asphalt over concrete", "albedo": 0.12, "conductivity_w_mk": 1.2, "heat_capacity_mj_m3k": 1.9},
@@ -18,8 +18,8 @@
       "baseline_albedo": 0.12,
       "reported_effect": "Boston study: afternoon surface temperature 104F -> 93F; perceived temperature 90F -> 88.6F. Shade still dominates over albedo for pedestrian comfort.",
       "unit": "m2",
-      "cost_usd_per_unit": 8.0,
-      "cost_source": "CoolSeal applied cost ~$5-14/sq yd (Phoenix); ~$2/sq yd material-only (Raleigh). Midpoint converted to m2.",
+      "cost_usd_per_unit": 22.28,
+      "cost_source": "Klimaat Appendix 3: $190.12/linear foot for 28 ft width (StreetBond coating, 3 applications + friction coat). Converted to m2.",
       "lifetime_years": 8
     },
     "cool_roof": {
@@ -28,8 +28,8 @@
       "raster_edit": {"albedo": 0.50, "landcover": "unchanged"},
       "baseline_albedo": 0.08,
       "unit": "m2",
-      "cost_usd_per_unit": 25.0,
-      "cost_source": "Order-of-magnitude for reflective roof coating; replace with BERDO/city retrofit figures.",
+      "cost_usd_per_unit": 69.97,
+      "cost_source": "Klimaat Appendix 3: $6.50/SF for temporary light-colored painted roof coating. Converted to m2.",
       "lifetime_years": 15
     },
     "green_roof": {
@@ -37,8 +37,8 @@
       "applies_to_landcover": [2],
       "raster_edit": {"albedo": 0.25, "landcover": 5, "lai": 2.88},
       "unit": "m2",
-      "cost_usd_per_unit": 250.0,
-      "cost_source": "Order-of-magnitude extensive green roof installed cost.",
+      "cost_usd_per_unit": 376.74,
+      "cost_source": "Klimaat Appendix 3: $35.00/SF for green roof. Converted to m2.",
       "lifetime_years": 30
     },
     "grass_conversion": {
@@ -55,8 +55,8 @@
       "raster_edit": {"cdsm_height_m": 5.0, "crown_radius_m": 1.5, "landcover": 4},
       "transmissivity": 0.08,
       "unit": "tree",
-      "cost_usd_per_unit": 1800.0,
-      "cost_source": "Order-of-magnitude planting + 2-year establishment watering, which Boston's contractor provides.",
+      "cost_usd_per_unit": 2024.0,
+      "cost_source": "Klimaat Appendix 3: $2,023.70/tree (3-inch caliper, no drainage box; includes excavation, disposal, bioretention soil mix / crushed stone).",
       "lifetime_years": 40,
       "establishment_years": 2
     },
@@ -65,8 +65,8 @@
       "raster_edit": {"cdsm_height_m": 5.0, "crown_radius_m": 2.5, "landcover": 4},
       "transmissivity": 0.08,
       "unit": "tree",
-      "cost_usd_per_unit": 2600.0,
-      "cost_source": "Order-of-magnitude; larger stock, larger pit.",
+      "cost_usd_per_unit": 6687.0,
+      "cost_source": "Klimaat Appendix 3: $6,687.33/tree (3-inch caliper with drainage box; includes excavation, installation). Medium trees in Boston sidewalks typically require drainage infrastructure.",
       "lifetime_years": 40,
       "establishment_years": 2,
       "reported_effect": "Boston study, trees on the north side of the street: afternoon surface temperature 105F -> 90F, perceived temperature 90F -> 85F. The largest single-measure effect in their tests."
@@ -77,8 +77,8 @@
       "albedo": 0.25,
       "solar_transmission": 0.5,
       "unit": "m2",
-      "cost_usd_per_unit": 200.0,
-      "cost_source": "Shade sails ~$12-35/sq ft installed; midpoint converted to m2.",
+      "cost_usd_per_unit": 1055.0,
+      "cost_source": "Klimaat Appendix 3: $98/SF for fabric awnings (light gauge steel frame, 50x20 ft canopy; includes installation, spread footings, LED lighting). Converted to m2.",
       "lifetime_years": 12
     },
     "solar_canopy": {
@@ -87,8 +87,8 @@
       "albedo": 0.10,
       "solar_transmission": 0.0,
       "unit": "m2",
-      "cost_usd_per_unit": 450.0,
-      "cost_source": "Order-of-magnitude PV canopy installed cost; generates a co-benefit the scoring can credit.",
+      "cost_usd_per_unit": 2150.0,
+      "cost_source": "Klimaat Appendix 3: $155.40/SF for prefab metal canopy (~$1,673/m2), plus ~$475/m2 for integrated PV panels. No direct Klimaat PV canopy figure; this is an estimate.",
       "lifetime_years": 25
     }
   },
