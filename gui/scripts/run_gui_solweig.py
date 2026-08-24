@@ -30,13 +30,32 @@ import solweig
 from PIL import Image
 from scipy.ndimage import distance_transform_edt
 
+def configure_solweig_backend() -> None:
+    """Avoid pathological GPU tiling without slowing safe CPU fallbacks.
+
+    Some integrated GPUs report only a tiny dedicated-memory budget even though
+    they share system memory. SOLWEIG then chooses impractically small tiles. A
+    missing GPU, however, already uses SOLWEIG's optimized CPU/RAM path and must
+    not be forced into its slower compatibility mode.
+    """
+    limits = solweig.get_gpu_limits()
+    if limits is None:
+        return
+    budget = limits.get("gpu_memory_budget")
+    if not isinstance(budget, (int, float)) or budget < 1024 ** 3:
+        solweig.disable_gpu()
+
+
+# Configure the backend before constructing any SOLWEIG object.
+configure_solweig_backend()
+
 GUI_ROOT = Path(__file__).resolve().parents[1]
 ROOT = GUI_ROOT.parent
 RUNS = ROOT / "runs" / "gui_solweig"
 AOI_NAME = "chinatown"
 AOI = ROOT / "data" / "aoi" / AOI_NAME
 PUBLIC = GUI_ROOT / "public" / "data" / AOI_NAME / "simulations"
-PHYSICS_VERSION = "gui-solweig-multi-aoi-v2"
+PHYSICS_VERSION = "gui-solweig-multi-aoi-v3-safe-tiling"
 GEOMETRY_VERSION = "gui-solweig-tree-geometry-v1"
 REFLECTIVE_ALBEDO = 0.45
 BASELINE_PAVEMENT_ALBEDO = 0.12
@@ -684,7 +703,7 @@ def main() -> None:
             cdsm=AOI / "cdsm.tif",
             tdsm=None,
             landcover=AOI / "landcover.tif",
-            cache_dir=RUNS / "cache" / AOI_NAME / grid_hash / "baseline_surface",
+            cache_dir=RUNS / "cache" / AOI_NAME / grid_hash / f"baseline_surface_{PHYSICS_VERSION}",
             output_dir=RUNS / "cache" / AOI_NAME / grid_hash / "baseline_results" / forcing_hash,
             weather=weather,
             location=location,
