@@ -1,27 +1,30 @@
 """Evolve heat-resilience policies with an LLM-in-the-loop.
 
-Minimal autoresearch harness: prompt an LLM to write a policy, score it
-against SOLWEIG, store the result, and repeat.  Inspired by AlphaEvolve's
-evolutionary code search, but synchronous and single-machine.
+Autoresearch harness: prompt an LLM to write a policy, score it against SOLWEIG,
+store the result, and repeat. Inspired by AlphaEvolve's evolutionary code search,
+with MAP-Elites diversity preservation and bounded parallel AOI scoring.
 
     # score the seed, then run 2 LLM generations on chinatown
-    python scripts/evolve.py --generations 2 --aoi chinatown
+    python scripts/evolve.py --generations 2 --aois chinatown
 
     # different budget and model
     python scripts/evolve.py --generations 5 --budget 1000000 --model claude-sonnet-4-6
 
 The seed policy (default: policies/baseline_policy.py) is scored first as
-generation 0.  Each subsequent generation picks the best-scoring candidate
-as parent, samples up to two other feasible candidates as "inspirations",
-and asks the LLM to write a new policy that improves on the parent.
+generation 0. After a seeding phase, each generation samples a MAP-Elites cell
+champion as parent and policies from other occupied cells as inspirations.
 
-Every candidate -- feasible, infeasible, or crashed -- is stored as a JSON
-file in the run directory so the evolutionary history is fully reproducible.
+Every candidate -- feasible, infeasible, or crashed -- is stored as JSON. A
+GUI-facing archive and packed per-AOI intervention layouts are updated after
+each iteration so a viewer can follow a run while it is in progress.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -35,9 +38,14 @@ from statistics import median
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
+import rasterio
+
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config"
 RUNS = ROOT / "runs"
+AOI_CONFIG = json.loads((CONFIG / "aois.json").read_text(encoding="utf-8"))
+DEFAULT_RESOLUTION_M = float(AOI_CONFIG.get("default_res_m", 2.0))
 
 # MAP-Elites axes: (metric_name, fixed_threshold_or_None).
 # None means "compute median from seeding phase."
@@ -129,6 +137,34 @@ def extract_policy_code(response: str) -> str | None:
     return code
 
 
+def policy_metadata(code: str, *, fallback_name: str = "evolved") -> tuple[str, str]:
+    """Read POLICY_NAME and complete DESCRIPTION strings from a policy module."""
+    name, description = fallback_name, ""
+    try:
+        module = ast.parse(code)
+    except SyntaxError:
+        return name, description
+    for statement in module.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        value = statement.value
+        for target in targets:
+            if not isinstance(target, ast.Name) or target.id not in ("POLICY_NAME", "DESCRIPTION"):
+                continue
+            try:
+                text = ast.literal_eval(value)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(text, str):
+                continue
+            if target.id == "POLICY_NAME":
+                name = text
+            else:
+                description = text
+    return name, description
+
+
 # ── prompt construction ────────────────────────────────────────────────── #
 
 def build_system_prompt() -> str:
@@ -170,7 +206,7 @@ importlib so it must be self-contained.
 
 Grids (all numpy arrays on the same shape):
   ctx.shape             tuple (rows, cols) of the AOI grid
-  ctx.res_m             pixel size in metres (2.0)
+  ctx.res_m             pixel size in metres ({DEFAULT_RESOLUTION_M:g} by default; never hardcode it)
   ctx.landcover         uint8, UMEP codes: 1=paved 2=building 3=evergreen 4=deciduous 5=grass 6=bare 7=water
   ctx.dsm               ground + buildings, metres above sea level
   ctx.dem               bare earth, metres above sea level
@@ -236,7 +272,9 @@ Other reported scores (not the fitness, but important):
 - Every pixel must pass ctx.placeable(action). Use ctx.plantable for trees,
   ctx.buildable for canopies. Placing on roadbed, near hydrants, on wrong
   land cover, or under existing canopy is a violation.
-- No pixel may appear in two Placements.
+- A pixel may appear only once within a physical layer: ground treatment,
+  roof treatment, or overhead shade. Ground treatment and overhead shade may
+  share a pixel because they are different layers.
 - plan() must return within 120 seconds wall-clock.
 
 A single violation makes the ENTIRE policy infeasible: zero score, no
@@ -248,7 +286,9 @@ simulation. The auditor reports the violation strings.
 - Using ctx.eligible() alone without ctx.sitable() -- eligible checks land cover,
   sitable checks physical rules. Use ctx.placeable() or ctx.plantable/ctx.buildable.
 - Indexing rows/cols outside ctx.shape.
-- Returning duplicate pixels across Placements (double-booking).
+- Returning duplicate pixels across Placements in the same physical layer
+  (ground treatment, roof treatment, or overhead shade). A ground treatment
+  may share a pixel with overhead shade.
 - Overspending the budget by even $1 (use ctx.affordable() to compute limits).
 - Forgetting the imports (from policy_api import Placement, PlanningContext).
 
@@ -389,6 +429,7 @@ def save_candidate(run_dir: Path, candidate: dict) -> Path:
     cand_dir.mkdir(parents=True, exist_ok=True)
     path = cand_dir / f"{candidate['id']}.json"
     path.write_text(json.dumps(candidate, indent=2), encoding="utf-8")
+    refresh_archive(run_dir, state="running")
     return path
 
 
@@ -400,6 +441,139 @@ def load_candidates(run_dir: Path) -> list[dict]:
     for path in sorted(cand_dir.glob("*.json")):
         candidates.append(json.loads(path.read_text(encoding="utf-8")))
     return candidates
+
+
+def atomic_json(path: Path, value: dict) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def refresh_archive(run_dir: Path, *, state: str) -> Path:
+    """Write the stable, lightweight index consumed by the future GUI viewer."""
+    run_path = run_dir / "run.json"
+    run = json.loads(run_path.read_text(encoding="utf-8")) if run_path.exists() else {}
+    candidates = load_candidates(run_dir)
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else None
+    public_fields = (
+        "id", "generation", "parent_id", "inspiration_ids", "policy_name",
+        "description", "verdict", "fitness", "objectives", "violations",
+        "cell", "aois_scored", "timestamp_utc", "model", "policy_file",
+        "score_files", "layout_files",
+    )
+    archive = {
+        "schema_version": 1,
+        "state": state,
+        "updated_utc": datetime.now(timezone.utc).isoformat(),
+        "run": run,
+        "iterations": [
+            {key: candidate.get(key) for key in public_fields if key in candidate}
+            for candidate in sorted(candidates, key=lambda item: (item.get("generation", 0), item["id"]))
+        ],
+        "summary": summary,
+    }
+    path = run_dir / "archive.json"
+    atomic_json(path, archive)
+    return path
+
+
+GUI_MASK_ACTIONS = {
+    "light_road": "reflective_pavement",
+    "cool_roof": "cool_roof",
+    "green_roof": "green_roof",
+    "grass_conversion": "depaved_pavement",
+    "shade_canopy": "shade_canopy",
+    "solar_canopy": "solar_canopy",
+}
+
+
+def _aoi_directory(aoi: str, resolution_m: float) -> Path:
+    for candidate in (ROOT / "data/aoi" / aoi, ROOT / "data/aoi" / f"{aoi}_{resolution_m:g}m"):
+        metadata = candidate / "aoi.json"
+        if not metadata.exists():
+            continue
+        built = json.loads(metadata.read_text(encoding="utf-8"))
+        if abs(float(built["resolution_m"]) - resolution_m) < 1e-9:
+            return candidate
+    raise FileNotFoundError(f"No {resolution_m:g} m AOI build found for {aoi}")
+
+
+def _packed_mask(mask: np.ndarray) -> dict:
+    packed = np.packbits(mask.reshape(-1), bitorder="little")
+    return {
+        "width": int(mask.shape[1]),
+        "height": int(mask.shape[0]),
+        "count": int(mask.sum()),
+        "data": base64.b64encode(packed.tobytes()).decode("ascii"),
+    }
+
+
+def export_candidate_artifacts(
+    run_dir: Path,
+    candidate_id: str,
+    score_dir: Path,
+    aois: list[str],
+    resolution_m: float,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Convert scorer NPZ solutions into compact browser-readable layouts."""
+    layouts: dict[str, str] = {}
+    scores: dict[str, str] = {}
+    intervention_menu = json.loads(
+        (CONFIG / "interventions.json").read_text(encoding="utf-8")
+    )["interventions"]
+    for aoi in aois:
+        aoi_score_dir = score_dir if len(aois) == 1 else score_dir / aoi
+        score_path = aoi_score_dir / "score.json"
+        if score_path.exists():
+            scores[aoi] = str(score_path.relative_to(run_dir))
+        solution_path = aoi_score_dir / f"solution_{aoi}.npz"
+        if not solution_path.exists():
+            continue
+        aoi_dir = _aoi_directory(aoi, resolution_m)
+        with rasterio.open(aoi_dir / "landcover.tif") as source:
+            shape = (source.height, source.width)
+        masks = {
+            request_key: np.zeros(shape, dtype=bool)
+            for request_key in GUI_MASK_ACTIONS.values()
+        }
+        trees: list[dict] = []
+        with np.load(solution_path) as solution:
+            for key in solution.files:
+                action = key.split("_", 1)[1]
+                coordinates = np.asarray(solution[key], dtype="int64")
+                if coordinates.size == 0:
+                    continue
+                rows, cols = coordinates
+                if action in ("tree_small", "tree_medium"):
+                    spec = intervention_menu[action]["raster_edit"]
+                    trees.extend({
+                        "id": f"{candidate_id}-{aoi}-{action}-{index}",
+                        "x": float(col) + 0.5,
+                        "y": float(row) + 0.5,
+                        "size": "small" if action == "tree_small" else "medium",
+                        "heightM": float(spec["cdsm_height_m"]),
+                        "crownDiameterM": float(spec["crown_radius_m"]) * 2.0,
+                    } for index, (row, col) in enumerate(zip(rows, cols)))
+                elif action in GUI_MASK_ACTIONS:
+                    masks[GUI_MASK_ACTIONS[action]][rows, cols] = True
+        layout = {
+            "schema_version": 1,
+            "candidate_id": candidate_id,
+            "aoi": aoi,
+            "resolution_m": resolution_m,
+            "width": shape[1],
+            "height": shape[0],
+            "trees": trees,
+            "interventions": {
+                request_key: _packed_mask(mask) for request_key, mask in masks.items()
+            },
+        }
+        path = run_dir / "layouts" / candidate_id / f"{aoi}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json(path, layout)
+        layouts[aoi] = str(path.relative_to(run_dir))
+    return layouts, scores
 
 
 def best_candidate(candidates: list[dict]) -> dict | None:
@@ -503,6 +677,7 @@ def score_candidate(
     scenarios: str = "baseline",
     plan_timeout: float = 120.0,
     score_timeout: float = 600.0,
+    resolution_m: float = DEFAULT_RESOLUTION_M,
 ) -> dict | None:
     """Run score_policy.py as a subprocess, return parsed score.json or None."""
     cmd = [
@@ -514,6 +689,7 @@ def score_candidate(
         "--out", str(out_dir),
         "--scenarios", scenarios,
         "--plan-timeout", str(plan_timeout),
+        "--res", f"{resolution_m:g}",
     ]
     try:
         result = subprocess.run(
@@ -550,64 +726,33 @@ def score_candidate_multi(
     scenarios: str = "baseline",
     plan_timeout: float = 120.0,
     score_timeout: float = 600.0,
+    resolution_m: float = DEFAULT_RESOLUTION_M,
+    max_workers: int = 1,
 ) -> list[tuple[str, dict | None]]:
     """Score a policy on multiple AOIs in parallel.
 
-    Launches one score_policy.py subprocess per AOI simultaneously.
+    Runs independent score_policy.py subprocesses with bounded concurrency.
     Returns [(aoi_name, parsed_score_json_or_None), ...].
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Launch all subprocesses
-    procs: list[tuple[str, subprocess.Popen, Path]] = []
-    for aoi in aois:
+    def score_one(aoi: str) -> tuple[str, dict | None]:
         aoi_dir = out_dir / aoi
         aoi_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            sys.executable,
-            str(ROOT / "scripts" / "score_policy.py"),
-            "--policy", str(policy_path.resolve()),
-            "--aoi", aoi,
-            "--budget", str(budget),
-            "--out", str(aoi_dir),
-            "--scenarios", scenarios,
-            "--plan-timeout", str(plan_timeout),
-        ]
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=str(ROOT),
+        return aoi, score_candidate(
+            policy_path,
+            aoi,
+            budget,
+            aoi_dir,
+            scenarios=scenarios,
+            plan_timeout=plan_timeout,
+            score_timeout=score_timeout,
+            resolution_m=resolution_m,
         )
-        procs.append((aoi, proc, aoi_dir))
 
-    # Wait for all to complete
-    results: list[tuple[str, dict | None]] = []
-    for aoi, proc, aoi_dir in procs:
-        try:
-            proc.wait(timeout=score_timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            print(f"  {aoi}: timed out after {score_timeout}s")
-            results.append((aoi, None))
-            continue
-
-        if proc.returncode != 0:
-            stderr = proc.stderr.read() if proc.stderr else ""
-            print(f"  {aoi}: scorer exited with code {proc.returncode}")
-            if stderr:
-                for line in stderr.strip().splitlines()[-3:]:
-                    print(f"    {line}")
-
-        score_path = aoi_dir / "score.json"
-        if not score_path.exists():
-            print(f"  {aoi}: no score.json produced")
-            results.append((aoi, None))
-        else:
-            results.append(
-                (aoi, json.loads(score_path.read_text(encoding="utf-8")))
-            )
-
-    return results
+    workers = max(1, min(int(max_workers), len(aois)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(score_one, aois))
 
 
 def trace_lineage(candidate: dict, candidates: list[dict]) -> list[dict]:
@@ -743,6 +888,10 @@ def main() -> None:
                      help="seconds for plan() to run (default 120)")
     ap.add_argument("--score-timeout", type=float, default=600.0,
                      help="wall-clock timeout for the scoring subprocess (default 600)")
+    ap.add_argument("--res", type=float, default=DEFAULT_RESOLUTION_M,
+                     help=f"scoring grid resolution in metres (default {DEFAULT_RESOLUTION_M:g})")
+    ap.add_argument("--aoi-workers", type=int, default=1,
+                     help="AOIs to score concurrently (default 1; raise only when memory permits)")
     ap.add_argument("--seed-generations", type=int, default=5,
                      help="generations of random exploration before MAP-Elites (default 5)")
     ap.add_argument("--out", help="output directory (default runs/evolve_<timestamp>)")
@@ -762,13 +911,33 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "candidates").mkdir(exist_ok=True)
     (run_dir / "policies").mkdir(exist_ok=True)
+    atomic_json(run_dir / "run.json", {
+        "id": run_dir.name,
+        "started_utc": stamp,
+        "model": args.model,
+        "aois": aois,
+        "scenarios": [item.strip() for item in args.scenarios.split(",") if item.strip()],
+        "budget_usd_per_aoi": args.budget,
+        "resolution_m": args.res,
+        "generations": args.generations,
+        "seed_generations": args.seed_generations,
+        "aoi_workers": max(1, args.aoi_workers),
+        "map_axes": [
+            {"metric": name, "fixed_threshold": fixed} for name, fixed in MAP_AXES
+        ],
+    })
+    refresh_archive(run_dir, state="running")
 
     seed_code = seed_path.read_text(encoding="utf-8")
+    seed_copy = run_dir / "policies" / "gen00_seed.py"
+    seed_copy.write_text(seed_code, encoding="utf-8")
 
     print(f"SHADE evolution harness")
     print(f"  run dir:      {run_dir}")
     print(f"  aois:         {', '.join(aois)} ({len(aois)})")
     print(f"  budget:       ${args.budget:,.0f}")
+    print(f"  resolution:   {args.res:g} m")
+    print(f"  AOI workers:  {max(1, args.aoi_workers)}")
     print(f"  generations:  {args.generations}")
     print(f"  seed-gens:    {args.seed_generations}")
     print(f"  model:        {args.model}")
@@ -786,6 +955,7 @@ def main() -> None:
             scenarios=args.scenarios,
             plan_timeout=args.plan_timeout,
             score_timeout=args.score_timeout,
+            resolution_m=args.res,
         )
         if result is None:
             raise SystemExit("seed policy failed to score -- fix it before evolving")
@@ -798,6 +968,8 @@ def main() -> None:
             scenarios=args.scenarios,
             plan_timeout=args.plan_timeout,
             score_timeout=args.score_timeout,
+            resolution_m=args.res,
+            max_workers=args.aoi_workers,
         )
         failed = [(n, r) for n, r in aoi_results if r is None]
         if failed:
@@ -825,20 +997,11 @@ def main() -> None:
     seed_fitness = (
         seed_objectives.get("heat_relief_c") if seed_objectives else None
     )
+    seed_layouts, seed_scores = export_candidate_artifacts(
+        run_dir, "gen00_seed", score_dir, aois, args.res
+    )
 
-    # Extract POLICY_NAME and DESCRIPTION from seed code
-    seed_name = "baseline"
-    seed_desc = ""
-    name_match = re.search(r'POLICY_NAME\s*=\s*["\'](.+?)["\']', seed_code)
-    if name_match:
-        seed_name = name_match.group(1)
-    desc_match = re.search(r'DESCRIPTION\s*=\s*\(\s*["\'](.+?)["\']', seed_code, re.DOTALL)
-    if desc_match:
-        seed_desc = desc_match.group(1)
-    else:
-        desc_match = re.search(r'DESCRIPTION\s*=\s*["\'](.+?)["\']', seed_code)
-        if desc_match:
-            seed_desc = desc_match.group(1)
+    seed_name, seed_desc = policy_metadata(seed_code, fallback_name="baseline")
 
     seed_candidate = {
         "id": "gen00_seed",
@@ -855,6 +1018,9 @@ def main() -> None:
         "aois_scored": aois,
         "timestamp_utc": stamp,
         "model": "seed",
+        "policy_file": str(seed_copy.relative_to(run_dir)),
+        "score_files": seed_scores,
+        "layout_files": seed_layouts,
     }
     save_candidate(run_dir, seed_candidate)
 
@@ -997,6 +1163,7 @@ def main() -> None:
                 scenarios=args.scenarios,
                 plan_timeout=args.plan_timeout,
                 score_timeout=args.score_timeout,
+                resolution_m=args.res,
             )
             if result is None:
                 score_seconds = time.time() - t0
@@ -1032,6 +1199,8 @@ def main() -> None:
                 scenarios=args.scenarios,
                 plan_timeout=args.plan_timeout,
                 score_timeout=args.score_timeout,
+                resolution_m=args.res,
+                max_workers=args.aoi_workers,
             )
             failed = [(n, r) for n, r in aoi_results if r is None]
             infeasible_aois = [
@@ -1092,19 +1261,7 @@ def main() -> None:
 
         score_seconds = time.time() - t0
 
-        # Extract name/description from generated code
-        policy_name = "evolved"
-        desc = ""
-        m = re.search(r'POLICY_NAME\s*=\s*["\'](.+?)["\']', code)
-        if m:
-            policy_name = m.group(1)
-        m = re.search(r'DESCRIPTION\s*=\s*["\'](.+?)["\']', code)
-        if m:
-            desc = m.group(1)
-        elif re.search(r'DESCRIPTION\s*=\s*\(', code):
-            m = re.search(r'DESCRIPTION\s*=\s*\(\s*["\'](.+?)["\']', code, re.DOTALL)
-            if m:
-                desc = m.group(1)
+        policy_name, desc = policy_metadata(code)
 
         # Compute cell assignment if MAP-Elites is active
         cell = None
@@ -1112,6 +1269,9 @@ def main() -> None:
             cell = candidate_cell(
                 {"objectives": objectives, "fitness": fitness}, thresholds
             )
+        layout_files, score_files = export_candidate_artifacts(
+            run_dir, cand_id, score_dir, aois, args.res
+        )
 
         candidate = {
             "id": cand_id,
@@ -1129,7 +1289,9 @@ def main() -> None:
             "aois_scored": aois,
             "timestamp_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
             "model": args.model,
-            "score_json_path": str(score_dir),
+            "policy_file": str(policy_path.relative_to(run_dir)),
+            "score_files": score_files,
+            "layout_files": layout_files,
         }
         save_candidate(run_dir, candidate)
 
@@ -1251,7 +1413,9 @@ def main() -> None:
     (run_dir / "summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"
     )
+    archive_path = refresh_archive(run_dir, state="complete")
     print(f"-> {run_dir / 'summary.json'}")
+    print(f"-> {archive_path}  (GUI archive)")
 
 
 if __name__ == "__main__":

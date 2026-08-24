@@ -1,4 +1,4 @@
-"""Run a Chinatown SOLWEIG baseline or intervention comparison for the local GUI.
+"""Run a SOLWEIG baseline or intervention comparison for a local GUI study area.
 
 The Vite development server writes a request JSON and launches this script in
 the project's virtual environment. Baseline-only requests simulate the untouched
@@ -32,10 +32,11 @@ from scipy.ndimage import distance_transform_edt
 
 GUI_ROOT = Path(__file__).resolve().parents[1]
 ROOT = GUI_ROOT.parent
-AOI = ROOT / "data" / "aoi" / "chinatown"
 RUNS = ROOT / "runs" / "gui_solweig"
-PUBLIC = GUI_ROOT / "public" / "data" / "chinatown" / "simulations"
-PHYSICS_VERSION = "gui-solweig-solar-canopy-v1"
+AOI_NAME = "chinatown"
+AOI = ROOT / "data" / "aoi" / AOI_NAME
+PUBLIC = GUI_ROOT / "public" / "data" / AOI_NAME / "simulations"
+PHYSICS_VERSION = "gui-solweig-multi-aoi-v2"
 GEOMETRY_VERSION = "gui-solweig-tree-geometry-v1"
 REFLECTIVE_ALBEDO = 0.45
 BASELINE_PAVEMENT_ALBEDO = 0.12
@@ -99,7 +100,14 @@ def canonical_trees(trees: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def validate_tree_placements(trees: list[dict[str, Any]], landcover: np.ndarray, resolution: float) -> None:
-    """Mirror the GUI's full-crown building/water/boundary validation server-side."""
+    """Validate geometry while matching the policy auditor's centre-pixel rule.
+
+    The strict repository contract audits the planting pixel, then paints the
+    configured crown as a clipped disc.  Rejecting an otherwise feasible policy
+    because that disc crosses a roof edge would make the GUI simulator disagree
+    with ``score_policy.py`` and prevent archived policies from being viewed.
+    Interactive GUI placement may remain more conservative as a design aid.
+    """
     rows, cols = landcover.shape
     for index, tree in enumerate(trees, start=1):
         x = float(tree["x"])
@@ -112,18 +120,12 @@ def validate_tree_placements(trees: list[dict[str, Any]], landcover: np.ndarray,
             raise ValueError(f"Tree {index} height {height:g} m is outside the supported 2–30 m range")
         if not 2.0 <= crown_diameter <= 20.0:
             raise ValueError(f"Tree {index} crown {crown_diameter:g} m is outside the supported 2–20 m range")
-        radius = crown_diameter / (2.0 * resolution)
-        min_x = int(np.floor(x - radius))
-        max_x = int(np.ceil(x + radius))
-        min_y = int(np.floor(y - radius))
-        max_y = int(np.ceil(y + radius))
-        if min_x < 0 or min_y < 0 or max_x >= cols or max_y >= rows:
-            raise ValueError(f"Tree {index} crown crosses the study boundary")
-        yy, xx = np.ogrid[min_y : max_y + 1, min_x : max_x + 1]
-        crown = (xx - x) ** 2 + (yy - y) ** 2 <= radius**2
-        covered = landcover[min_y : max_y + 1, min_x : max_x + 1][crown]
-        if np.any((covered <= 0) | np.isin(covered, (2, 7))):
-            raise ValueError(f"Tree {index} crown overlaps a building, water, or invalid AOI cell")
+        col = int(np.floor(x))
+        row = int(np.floor(y))
+        if col < 0 or col >= cols or row < 0 or row >= rows:
+            raise ValueError(f"Tree {index} planting pixel falls outside the study boundary")
+        if int(landcover[row, col]) not in (1, 3, 4, 5, 6):
+            raise ValueError(f"Tree {index} planting pixel is on a building, water, or invalid AOI cell")
 
 
 def encode_raster_mask(mask: np.ndarray) -> dict[str, Any]:
@@ -437,24 +439,28 @@ def run_surface(
     return tmrt, utci
 
 
-def local_mask(shape: tuple[int, int], trees: list[dict[str, Any]], radius_m: float = 20.0) -> np.ndarray:
+def local_mask(
+    shape: tuple[int, int], trees: list[dict[str, Any]], resolution_m: float,
+    radius_m: float = 20.0,
+) -> np.ndarray:
     mask = np.zeros(shape, dtype=bool)
     rows, cols = shape
+    radius_pixels = radius_m / max(resolution_m, 1e-6)
     for tree in trees:
         x = float(tree["x"])
         y = float(tree["y"])
-        min_x, max_x = max(0, int(x - radius_m)), min(cols - 1, int(x + radius_m))
-        min_y, max_y = max(0, int(y - radius_m)), min(rows - 1, int(y + radius_m))
+        min_x, max_x = max(0, int(x - radius_pixels)), min(cols - 1, int(x + radius_pixels))
+        min_y, max_y = max(0, int(y - radius_pixels)), min(rows - 1, int(y + radius_pixels))
         yy, xx = np.ogrid[min_y : max_y + 1, min_x : max_x + 1]
-        mask[min_y : max_y + 1, min_x : max_x + 1] |= (xx - x) ** 2 + (yy - y) ** 2 <= radius_m**2
+        mask[min_y : max_y + 1, min_x : max_x + 1] |= (xx - x) ** 2 + (yy - y) ** 2 <= radius_pixels**2
     return mask
 
 
-def surrounding_mask(mask: np.ndarray, radius_pixels: float = 20.0) -> np.ndarray:
+def surrounding_mask(mask: np.ndarray, resolution_m: float, radius_m: float = 20.0) -> np.ndarray:
     """Include the intervention and cells within a pedestrian-scale radius."""
     if not mask.any():
         return np.zeros_like(mask, dtype=bool)
-    return distance_transform_edt(~mask) <= radius_pixels
+    return distance_transform_edt(~mask) <= radius_m / max(resolution_m, 1e-6)
 
 
 def metric_summary(
@@ -516,6 +522,7 @@ def encode_metrics(path: Path, tmrt: np.ndarray, utci: np.ndarray, metrics: dict
 
 
 def export_stable_baseline(
+    aoi: str,
     scenario: str,
     date: str,
     hour: int,
@@ -524,7 +531,7 @@ def export_stable_baseline(
     metrics: dict[str, dict[str, float]],
 ) -> dict[str, Any]:
     baseline_name = f"{scenario}_{hour}"
-    path = GUI_ROOT / "public" / "data" / "chinatown" / "solweig_baselines" / f"{baseline_name}.png"
+    path = GUI_ROOT / "public" / "data" / aoi / "solweig_baselines" / f"{baseline_name}.png"
     encode_metrics(path, tmrt, utci, metrics)
     baseline = {
         "model": f"SOLWEIG {getattr(solweig, '__version__', 'unknown')}",
@@ -532,7 +539,8 @@ def export_stable_baseline(
         "scenario": scenario,
         "date": date,
         "hour": hour,
-        "file": f"/data/chinatown/solweig_baselines/{baseline_name}.png",
+        "aoi": aoi,
+        "file": f"/data/{aoi}/solweig_baselines/{baseline_name}.png",
         "mean_domains": {
             "mrt": "all valid AOI cells",
             "utci": "all valid AOI cells except baseline building roofs",
@@ -552,10 +560,24 @@ def export_stable_baseline(
 
 
 def main() -> None:
+    global AOI_NAME, AOI, PUBLIC
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", required=True, type=Path)
     args = parser.parse_args()
     request = json.loads(args.request.read_text())
+    configured_aois = json.loads((ROOT / "config" / "aois.json").read_text(encoding="utf-8"))["aois"]
+    AOI_NAME = str(request.get("aoi", "chinatown"))
+    if AOI_NAME not in configured_aois:
+        raise ValueError(f"Unknown study area: {AOI_NAME}")
+    gui_manifest_path = GUI_ROOT / "public" / "data" / AOI_NAME / "manifest.json"
+    if gui_manifest_path.exists():
+        gui_manifest = json.loads(gui_manifest_path.read_text(encoding="utf-8"))
+        AOI = ROOT / str(gui_manifest.get("source_directory", f"data/aoi/{AOI_NAME}"))
+    else:
+        AOI = ROOT / "data" / "aoi" / AOI_NAME
+    if not (AOI / "aoi.json").exists():
+        raise FileNotFoundError(f"Study area {AOI_NAME} has not been built")
+    PUBLIC = GUI_ROOT / "public" / "data" / AOI_NAME / "simulations"
     run_id = str(request["id"])
     mode = str(request.get("mode", "comparison"))
     if mode not in {"baseline", "comparison"}:
@@ -573,6 +595,14 @@ def main() -> None:
             baseline_pavement = baseline_landcover == 1
             baseline_buildings = baseline_landcover == 2
             perceived_temperature_domain = ~baseline_buildings
+        aoi_metadata = json.loads((AOI / "aoi.json").read_text(encoding="utf-8"))
+        grid_hash = fingerprint({
+            "aoi": AOI_NAME,
+            "source_directory": str(AOI.relative_to(ROOT)),
+            "resolution_m": aoi_resolution,
+            "shape": aoi_shape,
+            "built_utc": aoi_metadata.get("built_utc"),
+        })
         validate_tree_placements(trees, baseline_landcover, aoi_resolution)
         reflective_mask, reflective_snapshot = decode_raster_mask(request.get("reflective_pavement"), aoi_shape, "Reflective pavement")
         invalid_reflective_pixels = int(np.count_nonzero(reflective_mask & ~baseline_pavement))
@@ -581,7 +611,7 @@ def main() -> None:
             reflective_snapshot = encode_raster_mask(reflective_mask)
             reflective_snapshot["clipped_invalid_pixels"] = invalid_reflective_pixels
         depaved_mask, depaved_snapshot = decode_raster_mask(request.get("depaved_pavement"), aoi_shape, "Pavement to grass")
-        eligibility_path = GUI_ROOT / "public" / "data" / "chinatown" / "depavable_mask.png"
+        eligibility_path = GUI_ROOT / "public" / "data" / AOI_NAME / "depavable_mask.png"
         if not eligibility_path.exists():
             raise FileNotFoundError("Missing offline pavement-to-grass eligibility mask; export the GUI layers first")
         depavable = np.asarray(Image.open(eligibility_path).convert("L")) >= 128
@@ -635,9 +665,11 @@ def main() -> None:
         hour = int(request.get("hour", 15))
         epw, weather = select_weather(scenario, date, hour)
         location = solweig.Location.from_epw(str(epw))
-        geometry_hash = fingerprint({"version": GEOMETRY_VERSION, "trees": trees})
+        geometry_hash = fingerprint({"version": GEOMETRY_VERSION, "grid_hash": grid_hash, "trees": trees})
         layout_hash = fingerprint({
             "physics_version": PHYSICS_VERSION,
+            "grid_hash": grid_hash,
+            "aoi": AOI_NAME,
             "geometry_hash": geometry_hash,
             "reflective_pavement": reflective_snapshot["data"],
             "cool_roof": cool_roof_snapshot["data"],
@@ -646,14 +678,14 @@ def main() -> None:
             "shade_canopy": shade_canopy_snapshot["data"],
             "solar_canopy": solar_canopy_snapshot["data"],
         })
-        forcing_hash = fingerprint({"physics_version": PHYSICS_VERSION, "scenario": scenario, "date": date, "hour": hour})
+        forcing_hash = fingerprint({"physics_version": PHYSICS_VERSION, "grid_hash": grid_hash, "scenario": scenario, "date": date, "hour": hour})
 
         baseline_tmrt, baseline_utci = run_surface(
             cdsm=AOI / "cdsm.tif",
             tdsm=None,
             landcover=AOI / "landcover.tif",
-            cache_dir=RUNS / "cache" / "baseline_surface",
-            output_dir=RUNS / "cache" / "baseline_results" / forcing_hash,
+            cache_dir=RUNS / "cache" / AOI_NAME / grid_hash / "baseline_surface",
+            output_dir=RUNS / "cache" / AOI_NAME / grid_hash / "baseline_results" / forcing_hash,
             weather=weather,
             location=location,
             status=status,
@@ -669,6 +701,7 @@ def main() -> None:
                 "utci": baseline_metric_summary(baseline_utci, perceived_temperature_domain),
             }
             baseline = export_stable_baseline(
+                AOI_NAME,
                 scenario,
                 date,
                 hour,
@@ -689,7 +722,7 @@ def main() -> None:
 
         status.update("running", "Applying proposed interventions", 45)
         if trees:
-            inputs_dir = RUNS / "cache" / "layouts" / geometry_hash / "inputs"
+            inputs_dir = RUNS / "cache" / AOI_NAME / grid_hash / "layouts" / geometry_hash / "inputs"
             proposed_cdsm, proposed_landcover = apply_tree_geometry(trees, inputs_dir)
         else:
             proposed_cdsm = AOI / "cdsm.tif"
@@ -700,7 +733,7 @@ def main() -> None:
                 proposed_cdsm,
                 shade_canopy_mask,
                 solar_canopy_mask,
-                RUNS / "cache" / "layouts" / layout_hash / "inputs",
+                RUNS / "cache" / AOI_NAME / grid_hash / "layouts" / layout_hash / "inputs",
             )
         else:
             physical_shade_canopy_mask = shade_canopy_mask
@@ -709,19 +742,19 @@ def main() -> None:
             proposed_landcover = apply_depaving_landcover(
                 proposed_landcover,
                 depaved_mask,
-                RUNS / "cache" / "layouts" / layout_hash / "inputs",
+                RUNS / "cache" / AOI_NAME / grid_hash / "layouts" / layout_hash / "inputs",
             )
             with rasterio.open(proposed_landcover) as proposed_landcover_source:
                 depaved_material_mask = depaved_mask & (proposed_landcover_source.read(1) == 5)
         else:
             depaved_material_mask = depaved_mask
-        proposed_surface_cache = RUNS / "cache" / "layouts" / layout_hash / "surface"
+        proposed_surface_cache = RUNS / "cache" / AOI_NAME / grid_hash / "layouts" / layout_hash / "surface"
         intervention_tmrt, intervention_utci = run_surface(
             cdsm=proposed_cdsm,
             tdsm=proposed_tdsm,
             landcover=proposed_landcover,
             cache_dir=proposed_surface_cache,
-            output_dir=RUNS / "cache" / "layout_results" / layout_hash / forcing_hash,
+            output_dir=RUNS / "cache" / AOI_NAME / grid_hash / "layout_results" / layout_hash / forcing_hash,
             weather=weather,
             location=location,
             status=status,
@@ -735,12 +768,12 @@ def main() -> None:
         )
 
         status.update("running", "Preparing map results", 94)
-        nearby = local_mask(baseline_tmrt.shape, trees)
+        nearby = local_mask(baseline_tmrt.shape, trees, aoi_resolution)
         nearby |= reflective_mask
-        nearby |= surrounding_mask(cool_roof_mask | green_roof_mask)
-        nearby |= surrounding_mask(depaved_mask)
-        nearby |= surrounding_mask(shade_canopy_mask)
-        nearby |= surrounding_mask(solar_canopy_mask)
+        nearby |= surrounding_mask(cool_roof_mask | green_roof_mask, aoi_resolution)
+        nearby |= surrounding_mask(depaved_mask, aoi_resolution)
+        nearby |= surrounding_mask(shade_canopy_mask, aoi_resolution)
+        nearby |= surrounding_mask(solar_canopy_mask, aoi_resolution)
         metrics = {
             "mrt": metric_summary(baseline_tmrt, intervention_tmrt, nearby),
             "utci": metric_summary(
@@ -753,7 +786,7 @@ def main() -> None:
         public_dir = PUBLIC / run_id
         encode_metrics(public_dir / "baseline.png", baseline_tmrt, baseline_utci, metrics)
         encode_metrics(public_dir / "intervention.png", intervention_tmrt, intervention_utci, metrics)
-        export_stable_baseline(scenario, date, hour, baseline_tmrt, baseline_utci, metrics)
+        export_stable_baseline(AOI_NAME, scenario, date, hour, baseline_tmrt, baseline_utci, metrics)
         result = {
             "kind": "comparison",
             "id": run_id,
@@ -761,7 +794,7 @@ def main() -> None:
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "model": f"SOLWEIG {getattr(solweig, '__version__', 'unknown')}",
             "physics_version": PHYSICS_VERSION,
-            "aoi": "chinatown",
+            "aoi": AOI_NAME,
             "scenario": scenario,
             "date": date,
             "hour": hour,
@@ -794,8 +827,8 @@ def main() -> None:
             },
             "metrics": metrics,
             "files": {
-                "baseline": f"/data/chinatown/simulations/{run_id}/baseline.png",
-                "intervention": f"/data/chinatown/simulations/{run_id}/intervention.png",
+                "baseline": f"/data/{AOI_NAME}/simulations/{run_id}/baseline.png",
+                "intervention": f"/data/{AOI_NAME}/simulations/{run_id}/intervention.png",
             },
         }
         atomic_json(public_dir / "result.json", result)

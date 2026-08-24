@@ -7,7 +7,7 @@
       "label": "Centre/South",
       "main_streets_district": "JP CENTRE/SOUTH",
       "split": "held_out",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         231332.8,
         895152.4,
@@ -25,7 +25,7 @@
       "label": "East Boston",
       "main_streets_district": "EAST BOSTON",
       "split": "held_out",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         237499.3,
         902050.7,
@@ -43,7 +43,7 @@
       "label": "Fields Corner",
       "main_streets_district": "FIELDS CORNER",
       "split": "held_out",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         235708.8,
         894198.2,
@@ -61,7 +61,7 @@
       "label": "Mission Hill",
       "main_streets_district": "MISSION HILL",
       "split": "held_out",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         232127.3,
         897688.8,
@@ -79,7 +79,7 @@
       "label": "West Roxbury",
       "main_streets_district": "WEST ROXBURY",
       "split": "held_out",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         227474.9,
         891657.1,
@@ -97,7 +97,7 @@
       "label": "3 Squares",
       "main_streets_district": "THREE SQUARES",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         231983.9,
         896429.1,
@@ -115,7 +115,7 @@
       "label": "Allston Village",
       "main_streets_district": "ALLSTON VILLAGE",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         229664.6,
         899784.8,
@@ -133,7 +133,7 @@
       "label": "Bowdoin/Geneva",
       "main_streets_district": "BOWDOIN GENEVA",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         235199.0,
         894542.2,
@@ -151,7 +151,7 @@
       "label": "Brighton",
       "main_streets_district": "BRIGHTON",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         227534.5,
         899523.7,
@@ -169,7 +169,7 @@
       "label": "Chinatown",
       "main_streets_district": "CHINATOWN",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         235663.4,
         899690.7,
@@ -187,7 +187,7 @@
       "label": "Dudley Square",
       "main_streets_district": "DUDLEY SQUARE",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         233822.9,
         897267.2,
@@ -205,7 +205,7 @@
       "label": "Egleston Square",
       "main_streets_district": "EGLESTON SQUARE",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         232529.8,
         895641.2,
@@ -223,7 +223,7 @@
       "label": "Four Corners",
       "main_streets_district": "FOUR CORNERS",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         234448.2,
         894019.5,
@@ -241,7 +241,7 @@
       "label": "Greater Ashmont",
       "main_streets_district": "GREATER ASHMONT",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         235515.4,
         892730.3,
@@ -259,7 +259,7 @@
       "label": "Grove Hall",
       "main_streets_district": "GREATER GROVE HALL",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         234047.3,
         895244.9,
@@ -277,7 +277,7 @@
       "label": "Hyde Park",
       "main_streets_district": "HYDE PARK",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         230620.8,
         889016.4,
@@ -295,7 +295,7 @@
       "label": "Mattapan",
       "main_streets_district": "MATTAPAN",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         232949.7,
         890578.6,
@@ -313,7 +313,7 @@
       "label": "Roslindale Village",
       "main_streets_district": "ROSLINDALE VILLAGE",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         230066.4,
         892479.3,
@@ -331,7 +331,7 @@
       "label": "Uphams Corner",
       "main_streets_district": "UPHAMS CORNER",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         235311.8,
         895764.2,
@@ -349,7 +349,7 @@
       "label": "Washington St Gateway",
       "main_streets_district": "WASHINGTON GATEWAY",
       "split": "train",
-      "res": 2.0,
+      "res": 1.0,
       "bbox_26986": [
         234707.7,
         898385.8,
@@ -365,6 +365,6 @@
     }
   },
   "split_method": "Stratified on mean UHII: districts sorted by heat, every 4th taken for the held-out set with the hottest (Chinatown) and coolest (Mattapan) kept in training. The held-out set therefore spans the full heat and canopy range and tests interpolation rather than extrapolation.",
-  "default_res_m": 2.0,
-  "res_note": "2 m is the working resolution for both search and final scoring. It is ~6x cheaper per SOLWEIG evaluation than 1 m while keeping street canyons and crown-scale shade resolved. 1 m builds (--res 1) are available for spot-checking that a result is not an artefact of the grid. Never compare scores across resolutions -- coarsening biases mean Tmrt warm. See DATA_MANIFEST.md section 8."
+  "default_res_m": 1.0,
+  "res_note": "1 m is the working resolution for both search and final scoring. Alternate resolutions can be built with --res for performance experiments. Never compare scores across resolutions -- coarsening biases mean Tmrt warm. See DATA_MANIFEST.md section 9."
 }

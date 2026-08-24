@@ -149,28 +149,41 @@ class SummaryDomainTests(unittest.TestCase):
     def test_roof_nearby_mask_reaches_surrounding_cells(self) -> None:
         roof = np.zeros((51, 51), dtype=bool)
         roof[25, 25] = True
-        nearby = runner.surrounding_mask(roof, radius_pixels=20)
+        nearby = runner.surrounding_mask(roof, resolution_m=1, radius_m=20)
         self.assertTrue(nearby[25, 25])
         self.assertTrue(nearby[25, 45])
         self.assertFalse(nearby[25, 46])
 
 
 class TreeValidationTests(unittest.TestCase):
-    def test_full_crown_rejects_buildings_and_water(self) -> None:
+    def test_policy_valid_center_allows_crown_to_cross_nearby_obstacles(self) -> None:
         landcover = np.ones((20, 20), dtype=np.uint8)
         landcover[10, 10] = 2
         landcover[15, 15] = 7
-        valid = [{"x": 4.0, "y": 4.0, "heightM": 5.0, "crownDiameterM": 3.0}]
-        runner.validate_tree_placements(valid, landcover, 1.0)
-        with self.assertRaisesRegex(ValueError, "overlaps a building"):
+        runner.validate_tree_placements(
+            [{"x": 9.0, "y": 10.0, "heightM": 5.0, "crownDiameterM": 3.0}],
+            landcover,
+            1.0,
+        )
+        runner.validate_tree_placements(
+            [{"x": 15.0, "y": 14.0, "heightM": 5.0, "crownDiameterM": 3.0}],
+            landcover,
+            1.0,
+        )
+
+    def test_policy_invalid_center_is_rejected(self) -> None:
+        landcover = np.ones((20, 20), dtype=np.uint8)
+        landcover[10, 10] = 2
+        landcover[15, 15] = 7
+        with self.assertRaisesRegex(ValueError, "planting pixel is on"):
             runner.validate_tree_placements(
-                [{"x": 9.0, "y": 10.0, "heightM": 5.0, "crownDiameterM": 3.0}],
+                [{"x": 10.5, "y": 10.5, "heightM": 5.0, "crownDiameterM": 3.0}],
                 landcover,
                 1.0,
             )
-        with self.assertRaisesRegex(ValueError, "overlaps a building"):
+        with self.assertRaisesRegex(ValueError, "planting pixel is on"):
             runner.validate_tree_placements(
-                [{"x": 15.0, "y": 14.0, "heightM": 5.0, "crownDiameterM": 3.0}],
+                [{"x": 15.5, "y": 15.5, "heightM": 5.0, "crownDiameterM": 3.0}],
                 landcover,
                 1.0,
             )

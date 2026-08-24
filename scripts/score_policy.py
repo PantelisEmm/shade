@@ -36,9 +36,9 @@ wrong metric visible instead of merely unrewarded.
 
 Feasibility is all-or-nothing and is settled before any simulation runs. A policy
 that overspends, places an action on land cover it is not allowed on, double-books
-a pixel, indexes outside the grid, or takes longer than `--plan-timeout` to decide
-scores nothing; `score.json` carries the violations instead of the objectives, so
-the next prompt can be told exactly what was wrong.
+a pixel within one physical layer, indexes outside the grid, or takes longer than
+`--plan-timeout` to decide scores nothing; `score.json` carries the violations
+instead of the objectives, so the next prompt can be told exactly what was wrong.
 """
 
 from __future__ import annotations
@@ -97,6 +97,7 @@ RUNS = ROOT / "runs"
 SVF_CACHE = RUNS / "_svf_cache"
 BASELINE_CACHE = RUNS / "_baseline_cache"
 SCORE_LOG = RUNS / "score_log.csv"
+DEFAULT_RESOLUTION_M = float(json.loads((ROOT / "config" / "aois.json").read_text(encoding="utf-8")).get("default_res_m", 1.0))
 
 # UTCI (degC) above which a pedestrian is in strong heat stress. The access
 # objective counts residents whose daytime mean crosses back below it.
@@ -243,7 +244,23 @@ def audit(ctx: PlanningContext, placements, budget_usd: float) -> tuple[list[str
     """
     problems: list[str] = []
     rows_n, cols_n = ctx.shape
-    claimed = np.zeros(ctx.shape, dtype=bool)
+    # Surface treatments and overhead shade can legitimately share an x/y cell:
+    # a shade canopy over reflective pavement is two physical interventions, not
+    # a duplicated request. Exclusivity is enforced within each physical layer.
+    action_layer = {
+        "light_road": "ground",
+        "grass_conversion": "ground",
+        "cool_roof": "roof",
+        "green_roof": "roof",
+        "tree_small": "shade",
+        "tree_medium": "shade",
+        "shade_canopy": "shade",
+        "solar_canopy": "shade",
+    }
+    claimed = {
+        layer: np.zeros(ctx.shape, dtype=bool)
+        for layer in set(action_layer.values())
+    }
     priceable = []  # an unknown action has no price, so it cannot be billed
 
     for i, p in enumerate(placements):
@@ -292,10 +309,15 @@ def audit(ctx: PlanningContext, placements, budget_usd: float) -> tuple[list[str
         repeats = len(flat) - len(np.unique(flat))
         if repeats:
             problems.append(f"{p.action}: {repeats} pixels listed more than once")
-        overlap = int(claimed[p.rows, p.cols].sum())
+        layer = action_layer.get(p.action, p.action)
+        layer_claimed = claimed.setdefault(layer, np.zeros(ctx.shape, dtype=bool))
+        overlap = int(layer_claimed[p.rows, p.cols].sum())
         if overlap:
-            problems.append(f"{p.action}: {overlap} pixels already taken by an earlier action")
-        claimed[p.rows, p.cols] = True
+            problems.append(
+                f"{p.action}: {overlap} pixels already taken by an earlier "
+                f"{layer}-layer action"
+            )
+        layer_claimed[p.rows, p.cols] = True
 
     total, by_action, counts = price(ctx, priceable)
     # A cent of float slop on a million-dollar budget is not an overspend.
@@ -768,10 +790,25 @@ def resolve_aois(args) -> list[str]:
 
 
 def aoi_path(name: str, res: float) -> Path:
-    path = AOI_DIR / (name if abs(res - 2.0) < 1e-9 else f"{name}_{res:g}m")
-    if not (path / "aoi.json").exists():
-        raise SystemExit(f"{path} is not built; run scripts/build_aoi.py --aoi {name}")
-    return path
+    # Older/local workspaces may have the actively built AOI at ``data/aoi/name``
+    # even when it is not the repository's current default resolution. Prefer
+    # whichever candidate's own metadata matches the requested grid.
+    candidates = [AOI_DIR / name, AOI_DIR / f"{name}_{res:g}m"]
+    for path in candidates:
+        meta_path = path / "aoi.json"
+        if not meta_path.exists():
+            continue
+        try:
+            built_res = float(json.loads(meta_path.read_text())["resolution_m"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if abs(built_res - res) < 1e-9:
+            return path
+    expected = " or ".join(str(path) for path in candidates)
+    raise SystemExit(
+        f"no {res:g} m build for {name!r} at {expected}; "
+        f"run scripts/build_aoi.py --aoi {name} --res {res:g}"
+    )
 
 
 # Per-run metrics that exist only to be pooled in `aggregate`, kept out of the
@@ -813,7 +850,7 @@ def main() -> None:
     ap.add_argument("--scenarios", default="baseline",
                     help="comma-separated scenario names from data/weather/scenarios")
     ap.add_argument("--budget", type=float, default=500_000.0, help="USD per AOI")
-    ap.add_argument("--res", type=float, default=2.0)
+    ap.add_argument("--res", type=float, default=DEFAULT_RESOLUTION_M)
     ap.add_argument("--date", default="07-27", help="MM-DD to simulate")
     ap.add_argument("--hours", default="10,13,16")
     ap.add_argument("--access-threshold", type=float, default=ACCESS_THRESHOLD_C)

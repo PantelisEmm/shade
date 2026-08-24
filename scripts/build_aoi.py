@@ -4,13 +4,12 @@ Pulls from live City of Boston / USGS image services plus the local land-cover
 raster, and writes every grid on ONE grid in EPSG:26986 (MA State Plane Mainland,
 metres) so SOLWEIG's shadow geometry is in metres.
 
-The default resolution is 2 m, used for both search and final scoring: about 6x
-cheaper per SOLWEIG evaluation than 1 m while still resolving street canyons and
-crown-scale shade. Build at 1 m with --res 1 only to spot-check that a result is
-not an artefact of the grid. See DATA_MANIFEST.md section 9.
+The default resolution is configured in ``config/aois.json`` and is currently
+1 m for both search and final scoring. Pass ``--res`` to build a side-by-side
+variant without changing the project default. See DATA_MANIFEST.md section 9.
 
-    python scripts/build_aoi.py --aoi nubian_square      # 2 m (default)
-    python scripts/build_aoi.py --aoi nubian_square --res 1
+    python scripts/build_aoi.py --aoi nubian_square      # configured default
+    python scripts/build_aoi.py --aoi nubian_square --res 2
     python scripts/build_aoi.py --list
     python scripts/build_aoi.py --neighborhood Roxbury
 
@@ -90,7 +89,7 @@ MAX_PX = 4000
 # Default pixel size in metres, used for search and final scoring alike. Changing
 # this changes which directory counts as the default build (see the suffix logic
 # in main()).
-DEFAULT_RES = 2.0
+DEFAULT_RES = float(json.loads((CONFIG / "aois.json").read_text(encoding="utf-8")).get("default_res_m", 1.0))
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +350,11 @@ def build(name: str, bbox: tuple, res: float, outdir: Path) -> None:
     for key, url in HEAT_SERVICES.items():
         arr = fetch_grid(url, bbox, res, key)
         if key in ("heat_ta3pm", "heat_ta3am"):
+            # The Boston image service sometimes returns 0°F outside its data
+            # footprint without declaring that value as nodata. Treat it as
+            # missing before conversion; otherwise it becomes a plausible-
+            # looking but impossible -17.78°C summer air temperature.
+            arr[arr <= 0] = np.nan
             arr = (arr - 32.0) * 5.0 / 9.0
         elif key == "heat_uhii":
             arr = arr * 5.0 / 9.0  # an intensity difference, so no 32 offset

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import {
   Building2,
   ChevronDown,
@@ -8,6 +8,7 @@ import {
   Cpu,
   Eye,
   EyeOff,
+  GitBranch,
   Info,
   Layers3,
   Map,
@@ -30,12 +31,14 @@ import {
   X,
 } from "lucide-react";
 import CoolRoofLayer from "./CoolRoofLayer";
+import AutoresearchNavigator, { type Archive, type ArchiveIteration, type ArchivedLayout } from "./AutoresearchNavigator";
 import GreenRoofLayer from "./GreenRoofLayer";
 import DepavedLayer from "./DepavedLayer";
 import ShadeCanopyLayer from "./ShadeCanopyLayer";
 import ScreeningMetricLayer from "./ScreeningMetricLayer";
 import InterventionMapLayers from "./InterventionMapLayers";
 import ReflectivePavementLayer from "./ReflectivePavementLayer";
+import StudyAreaOverview, { type OverviewArea } from "./StudyAreaOverview";
 import {
   countMaskPixels,
   encodeMaskBits,
@@ -59,10 +62,14 @@ type Layer = {
 };
 
 type Manifest = {
+  aoi: string;
+  label: string;
+  split?: "train" | "held_out";
   bbox: number[];
   width: number;
   height: number;
   resolution_m: number;
+  interventions?: Partial<Record<PolicyAction, { label: string; unit: "m2" | "tree"; cost_usd_per_unit: number }>>;
   built_utc: string;
   heat_ta3pm_c: { display_min: number; display_max: number };
   summary_masks?: {
@@ -70,7 +77,17 @@ type Manifest = {
     perceived_temperature_pixels: number;
     excluded_building_roof_pixels: number;
   };
-  layers?: { tree_placement_mask?: string; pavement_mask?: string; depavable_mask?: string; street_segments?: string; roof_regions?: string };
+  layers?: {
+    tree_placement_mask?: string;
+    tree_small_placeable_mask?: string;
+    tree_medium_placeable_mask?: string;
+    pavement_mask?: string;
+    depavable_mask?: string;
+    shade_canopy_placeable_mask?: string;
+    solar_canopy_placeable_mask?: string;
+    street_segments?: string;
+    roof_regions?: string;
+  };
   screening_metrics?: {
     file: string;
     approximate: boolean;
@@ -80,6 +97,7 @@ type Manifest = {
 };
 
 type TreeSize = "small" | "medium";
+type PolicyAction = "light_road" | "cool_roof" | "green_roof" | "grass_conversion" | "tree_small" | "tree_medium" | "shade_canopy" | "solar_canopy";
 
 type TreeIntervention = {
   id: string;
@@ -178,6 +196,31 @@ type PlacementMask = {
   pixels: Uint8ClampedArray;
 };
 
+const loadPlacementMask = (url: string) => new Promise<PlacementMask>((resolve, reject) => {
+  const image = new Image();
+  image.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      reject(new Error("Unable to read placement mask"));
+      return;
+    }
+    context.drawImage(image, 0, 0);
+    resolve({ width: canvas.width, height: canvas.height, pixels: context.getImageData(0, 0, canvas.width, canvas.height).data });
+  };
+  image.onerror = () => reject(new Error(`Unable to load ${url}`));
+  image.src = url;
+});
+
+const placementMaskHasPoint = (mask: PlacementMask, point: MapPoint, gridWidth: number, gridHeight: number) => {
+  if (point.x < 0 || point.y < 0 || point.x >= gridWidth || point.y >= gridHeight) return false;
+  const x = Math.min(mask.width - 1, Math.max(0, Math.floor((point.x / gridWidth) * mask.width)));
+  const y = Math.min(mask.height - 1, Math.max(0, Math.floor((point.y / gridHeight) * mask.height)));
+  return mask.pixels[(y * mask.width + x) * 4] >= 128;
+};
+
 type SimulationMetric = {
   display_min: number;
   display_max: number;
@@ -189,6 +232,7 @@ type SimulationMetric = {
 };
 
 type SolweigBaseline = {
+  aoi?: string;
   model: string;
   physics_version?: string;
   scenario: string;
@@ -204,6 +248,7 @@ type SimulationResult = {
   state: "complete";
   completed_at: string;
   model: string;
+  aoi?: string;
   physics_version?: string;
   scenario: string;
   date: string;
@@ -238,6 +283,46 @@ type SimulationJob = {
   result?: SimulationResult | BaselineJobResult;
 };
 
+type PolicyScoreObjectives = {
+  heat_relief_c: number | null;
+  expected_relief_c: number | null;
+  access_gain_pp: number | null;
+  equity_ratio: number | null;
+  equity_relief_c: number | null;
+  equity_pop_share: number | null;
+  equity_aois: number;
+  cobenefit_greened_pct: number | null;
+  cost_efficiency_person_c_per_100k: number | null;
+  tmrt_relief_c: number | null;
+  plan_survival: number | null;
+  pv_mwh_per_yr: number | null;
+  spend_usd: number | null;
+};
+
+type PolicyScoreReport = {
+  verdict: "feasible" | "infeasible";
+  objectives: PolicyScoreObjectives | null;
+  violations: Record<string, string[]>;
+  run: {
+    scenarios: string[];
+    resolution_m: number;
+    hours: number[];
+    horizon_years: number | null;
+  };
+  spend?: Record<string, { total_usd: number; budget_usd: number }>;
+  gui?: { layout_signature?: string; aoi?: string; scenario?: string; budget_usd?: number };
+};
+
+type PolicyScoreJob = {
+  id: string;
+  state: "queued" | "running" | "complete" | "failed" | "cancelled";
+  stage: string;
+  progress: number;
+  elapsed_seconds?: number;
+  error?: string;
+  result?: PolicyScoreReport;
+};
+
 type MetricKey = "mrt" | "utci" | "surface";
 type ScenarioKey = "baseline" | "warm_2c" | "humid_warm_2c" | "warm_4c";
 
@@ -255,7 +340,16 @@ const METRICS: Record<MetricKey, { label: string; shortLabel: string; unit: stri
   surface: { label: "Surface temperature", shortLabel: "Local surface reduction", unit: "°C", medium: 8.3, small: 5.4, color: "116, 76, 163" },
 };
 
-const TREE_COST = { small: 1800, medium: 2600 };
+const FALLBACK_UNIT_COSTS: Record<PolicyAction, number> = {
+  light_road: 22.28,
+  cool_roof: 69.97,
+  green_roof: 376.74,
+  grass_conversion: 90,
+  tree_small: 2024,
+  tree_medium: 6687,
+  shade_canopy: 1055,
+  solar_canopy: 2150,
+};
 
 const SCENARIOS: Record<ScenarioKey, { label: string; shortLabel: string; description: string; deltaC: number; holdRh: boolean }> = {
   baseline: { label: "Current climate · hottest TMY day", shortLabel: "Current climate", description: "TMYx 2011–2025, unmodified", deltaC: 0, holdRh: false },
@@ -285,20 +379,30 @@ const DRY_WARMING_HUMIDITY: Record<2 | 4, Record<number, number>> = {
   4: { 10: 30, 13: 25, 16: 24, 20: 28, 23: 38 },
 };
 
-const TREE_STORAGE_KEY = "shade.chinatown.tree-interventions.v1";
-const SIMULATION_STORAGE_KEY = "shade.chinatown.solweig-result.v2";
-const BASELINE_STORAGE_KEY = "shade.chinatown.solweig-baselines.v1";
-const REFLECTIVE_STORAGE_KEY = "shade.chinatown.reflective-pavement.v1";
-const COOL_ROOF_STORAGE_KEY = "shade.chinatown.cool-roof.v1";
-const GREEN_ROOF_STORAGE_KEY = "shade.chinatown.green-roof.v1";
-const DEPAVED_STORAGE_KEY = "shade.chinatown.depaved-pavement.v1";
-const SHADE_CANOPY_STORAGE_KEY = "shade.chinatown.shade-canopy.v1";
-const LEGACY_SHADE_CANOPY_ICONS_STORAGE_KEY = "shade.chinatown.shade-canopy-icons.v1";
-const SHADE_CANOPY_ICONS_STORAGE_KEY = "shade.chinatown.shade-canopy-icons.v2";
-const SOLAR_CANOPY_STORAGE_KEY = "shade.chinatown.solar-canopy.v1";
-const SOLAR_CANOPY_ICONS_STORAGE_KEY = "shade.chinatown.solar-canopy-icons.v1";
+const STUDY_AREA_STORAGE_KEY = "shade.active-study-area.v1";
+const storedStudyArea = localStorage.getItem(STUDY_AREA_STORAGE_KEY);
+const ACTIVE_AOI = storedStudyArea && /^[a-z0-9_]+$/.test(storedStudyArea) ? storedStudyArea : "chinatown";
+const WORKSPACE_STORAGE_PREFIX = `shade.workspace.v3.${ACTIVE_AOI}`;
+const TREE_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.trees`;
+const SIMULATION_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.solweig-result`;
+const POLICY_SCORE_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.policy-score`;
+const BASELINE_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.solweig-baselines`;
+const REFLECTIVE_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.reflective-pavement`;
+const COOL_ROOF_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.cool-roof`;
+const GREEN_ROOF_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.green-roof`;
+const DEPAVED_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.depaved-pavement`;
+const SHADE_CANOPY_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.shade-canopy`;
+const LEGACY_SHADE_CANOPY_ICONS_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.shade-canopy-icons-legacy`;
+const SHADE_CANOPY_ICONS_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.shade-canopy-icons`;
+const SOLAR_CANOPY_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.solar-canopy`;
+const SOLAR_CANOPY_ICONS_STORAGE_KEY = `${WORKSPACE_STORAGE_PREFIX}.solar-canopy-icons`;
+const AUTORESEARCH_MODE_STORAGE_KEY = "shade.autoresearch.enabled.v1";
+const DEFAULT_GRID_SIZE = 1001;
+const DEFAULT_RESOLUTION_M = 1;
+const MAP_FRAME_LEFT = 199;
+const MAP_DISPLAY_SIZE = 1000;
 const SHADE_CANOPY_ICON_SPACING_M = 12;
-const SOLWEIG_PHYSICS_VERSION = "gui-solweig-solar-canopy-v1";
+const SOLWEIG_PHYSICS_VERSION = "gui-solweig-multi-aoi-v2";
 const REFLECTIVE_LOCAL_EFFECT = { mrt: 0, utci: 0.8, surface: 6.1 } as const;
 
 const loadTrees = (): TreeIntervention[] => {
@@ -349,6 +453,28 @@ const loadSimulation = (): SimulationResult | null => {
   }
 };
 
+const loadPolicyScore = (): PolicyScoreReport | null => {
+  try {
+    const stored = localStorage.getItem(POLICY_SCORE_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch {
+    return null;
+  }
+};
+
+const compactFingerprint = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+const formatPolicyMetric = (value: number | null | undefined, suffix: string, digits = 2) => (
+  value === null || value === undefined ? "Not available" : `${value.toFixed(digits)}${suffix}`
+);
+
 const baselineCacheKey = (scenario: string, date: string, hour: number) => `${scenario}:${date}:${hour}`;
 
 const loadBaselineCache = (): Record<string, SolweigBaseline> => {
@@ -380,6 +506,8 @@ const layers: Layer[] = [
 ];
 
 function App() {
+  const [overviewOpen, setOverviewOpen] = useState(() => !localStorage.getItem(STUDY_AREA_STORAGE_KEY));
+  const dataRoot = `/data/${ACTIVE_AOI}`;
   const [visible, setVisible] = useState<Record<string, boolean>>({ base: true });
   const [panelOpen, setPanelOpen] = useState(true);
   const [metric, setMetric] = useState<MetricKey>("mrt");
@@ -403,7 +531,8 @@ function App() {
   const [brushCursor, setBrushCursor] = useState<MapPoint | null>(null);
   const [placementMask, setPlacementMask] = useState<PlacementMask | null>(null);
   const [placementMaskStatus, setPlacementMaskStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [reflectiveMask, setReflectiveMask] = useState<RasterMask>(() => loadRasterMask(REFLECTIVE_STORAGE_KEY));
+  const [treePlaceableMasks, setTreePlaceableMasks] = useState<Record<TreeSize, PlacementMask | null>>({ small: null, medium: null });
+  const [reflectiveMask, setReflectiveMask] = useState<RasterMask>(() => loadRasterMask(REFLECTIVE_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
   const reflectivePixelCount = useMemo(
     () => countMaskPixels(reflectiveMask.bits, reflectiveMask.width, reflectiveMask.height),
     [reflectiveMask.bits, reflectiveMask.width, reflectiveMask.height],
@@ -417,7 +546,7 @@ function App() {
   const [reflectiveEraseBox, setReflectiveEraseBox] = useState<RemovalBox | null>(null);
   const [reflectiveBrushDiameterM, setReflectiveBrushDiameterM] = useState(14);
   const [reflectiveCursor, setReflectiveCursor] = useState<MapPoint | null>(null);
-  const [depavedMask, setDepavedMask] = useState<RasterMask>(() => loadRasterMask(DEPAVED_STORAGE_KEY));
+  const [depavedMask, setDepavedMask] = useState<RasterMask>(() => loadRasterMask(DEPAVED_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
   const depavedPixelCount = useMemo(
     () => countMaskPixels(depavedMask.bits, depavedMask.width, depavedMask.height),
     [depavedMask.bits, depavedMask.width, depavedMask.height],
@@ -430,7 +559,8 @@ function App() {
   const [depaveBox, setDepaveBox] = useState<RemovalBox | null>(null);
   const [depaveBrushDiameterM, setDepaveBrushDiameterM] = useState(14);
   const [depaveCursor, setDepaveCursor] = useState<MapPoint | null>(null);
-  const [shadeCanopyMask, setShadeCanopyMask] = useState<RasterMask>(() => loadRasterMask(SHADE_CANOPY_STORAGE_KEY));
+  const [shadeCanopyMask, setShadeCanopyMask] = useState<RasterMask>(() => loadRasterMask(SHADE_CANOPY_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
+  const [shadeCanopyPlaceableMask, setShadeCanopyPlaceableMask] = useState<PlacementMask | null>(null);
   const [shadeCanopyIcons, setShadeCanopyIcons] = useState<ShadeCanopyIcon[]>(loadShadeCanopyIcons);
   const shadeCanopyPixelCount = useMemo(
     () => countMaskPixels(shadeCanopyMask.bits, shadeCanopyMask.width, shadeCanopyMask.height),
@@ -443,7 +573,8 @@ function App() {
   const [shadeCanopyWidthM, setShadeCanopyWidthM] = useState(6);
   const [shadeCanopyBrushDiameterM, setShadeCanopyBrushDiameterM] = useState(10);
   const [shadeCanopyCursor, setShadeCanopyCursor] = useState<MapPoint | null>(null);
-  const [solarCanopyMask, setSolarCanopyMask] = useState<RasterMask>(() => loadRasterMask(SOLAR_CANOPY_STORAGE_KEY));
+  const [solarCanopyMask, setSolarCanopyMask] = useState<RasterMask>(() => loadRasterMask(SOLAR_CANOPY_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
+  const [solarCanopyPlaceableMask, setSolarCanopyPlaceableMask] = useState<PlacementMask | null>(null);
   const [solarCanopyIcons, setSolarCanopyIcons] = useState<ShadeCanopyIcon[]>(loadSolarCanopyIcons);
   const solarCanopyPixelCount = useMemo(
     () => countMaskPixels(solarCanopyMask.bits, solarCanopyMask.width, solarCanopyMask.height),
@@ -456,12 +587,12 @@ function App() {
   const [solarCanopyWidthM, setSolarCanopyWidthM] = useState(6);
   const [solarCanopyBrushDiameterM, setSolarCanopyBrushDiameterM] = useState(10);
   const [solarCanopyCursor, setSolarCanopyCursor] = useState<MapPoint | null>(null);
-  const [coolRoofMask, setCoolRoofMask] = useState<RasterMask>(() => loadRasterMask(COOL_ROOF_STORAGE_KEY));
+  const [coolRoofMask, setCoolRoofMask] = useState<RasterMask>(() => loadRasterMask(COOL_ROOF_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
   const coolRoofPixelCount = useMemo(
     () => countMaskPixels(coolRoofMask.bits, coolRoofMask.width, coolRoofMask.height),
     [coolRoofMask.bits, coolRoofMask.width, coolRoofMask.height],
   );
-  const [greenRoofMask, setGreenRoofMask] = useState<RasterMask>(() => loadRasterMask(GREEN_ROOF_STORAGE_KEY));
+  const [greenRoofMask, setGreenRoofMask] = useState<RasterMask>(() => loadRasterMask(GREEN_ROOF_STORAGE_KEY, DEFAULT_GRID_SIZE, DEFAULT_GRID_SIZE));
   const greenRoofPixelCount = useMemo(
     () => countMaskPixels(greenRoofMask.bits, greenRoofMask.width, greenRoofMask.height),
     [greenRoofMask.bits, greenRoofMask.width, greenRoofMask.height],
@@ -478,6 +609,10 @@ function App() {
   const [placementNotice, setPlacementNotice] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [autoresearchMode, setAutoresearchMode] = useState(() => localStorage.getItem(AUTORESEARCH_MODE_STORAGE_KEY) === "true");
+  const [autoresearchCandidate, setAutoresearchCandidate] = useState<ArchiveIteration | null>(null);
+  const [autoresearchRunId, setAutoresearchRunId] = useState<string | null>(null);
+  const [autoresearchLayoutReady, setAutoresearchLayoutReady] = useState(false);
   const [simulationResult, setSimulationResult] = useState<SimulationResult | null>(loadSimulation);
   const [solweigBaseline, setSolweigBaseline] = useState<SolweigBaseline | null>(null);
   const [baselineLoadState, setBaselineLoadState] = useState<"loading" | "ready" | "missing" | "error">("loading");
@@ -486,6 +621,12 @@ function App() {
   const [simulationChecked, setSimulationChecked] = useState(false);
   const [simulationSetupOpen, setSimulationSetupOpen] = useState(false);
   const [simulationError, setSimulationError] = useState<string | null>(null);
+  const [policyScore, setPolicyScore] = useState<PolicyScoreReport | null>(loadPolicyScore);
+  const [policyScoreJob, setPolicyScoreJob] = useState<PolicyScoreJob | null>(null);
+  const [policyScoringReady, setPolicyScoringReady] = useState(false);
+  const [policyScoringChecked, setPolicyScoringChecked] = useState(false);
+  const [policyScoringBudget, setPolicyScoringBudget] = useState(() => loadPolicyScore()?.gui?.budget_usd ?? 500_000);
+  const [policyScoreError, setPolicyScoreError] = useState<string | null>(null);
   const [comparisonActive, setComparisonActive] = useState(false);
   const [comparisonSplit, setComparisonSplit] = useState(52);
   const [comparisonDragging, setComparisonDragging] = useState(false);
@@ -530,16 +671,256 @@ function App() {
   const coolRoofStrokePixels = useRef<number[]>([]);
   const roofStrokeDisplacedPixels = useRef<number[]>([]);
   const attemptedBaselines = useRef(new Set<string>());
+  const strictWorkspaceSanitized = useRef(false);
+  const autoresearchModeRef = useRef(autoresearchMode);
+  const autoresearchSimulationAttempt = useRef<string | null>(null);
 
   useEffect(() => {
-    fetch("/data/chinatown/manifest.json")
+    autoresearchModeRef.current = autoresearchMode;
+  }, [autoresearchMode]);
+
+  const maskFromArchive = useCallback((value: ArchivedLayout["interventions"][string] | undefined, width: number, height: number) => {
+    if (!value || value.width !== width || value.height !== height) return emptyRasterMask(width, height);
+    try {
+      const bits = decodeMaskBits(value.data);
+      if (bits.length !== Math.ceil((width * height) / 8)) return emptyRasterMask(width, height);
+      return { width, height, bits, count: countMaskPixels(bits, width, height) };
+    } catch {
+      return emptyRasterMask(width, height);
+    }
+  }, []);
+
+  const applyAutoresearchLayout = useCallback((layout: ArchivedLayout, iteration: ArchiveIteration, archive: Archive, runId: string) => {
+    if (layout.aoi !== ACTIVE_AOI) return;
+    const width = layout.width;
+    const height = layout.height;
+    const nextReflective = maskFromArchive(layout.interventions.reflective_pavement, width, height);
+    const nextCoolRoof = maskFromArchive(layout.interventions.cool_roof, width, height);
+    const nextGreenRoof = maskFromArchive(layout.interventions.green_roof, width, height);
+    const nextDepaved = maskFromArchive(layout.interventions.depaved_pavement, width, height);
+    const nextShade = maskFromArchive(layout.interventions.shade_canopy, width, height);
+    const nextSolar = maskFromArchive(layout.interventions.solar_canopy, width, height);
+    treesRef.current = layout.trees;
+    reflectiveMaskRef.current = nextReflective;
+    coolRoofMaskRef.current = nextCoolRoof;
+    greenRoofMaskRef.current = nextGreenRoof;
+    depavedMaskRef.current = nextDepaved;
+    shadeCanopyMaskRef.current = nextShade;
+    solarCanopyMaskRef.current = nextSolar;
+    setTrees(layout.trees);
+    setReflectiveMask(nextReflective);
+    setCoolRoofMask(nextCoolRoof);
+    setGreenRoofMask(nextGreenRoof);
+    setDepavedMask(nextDepaved);
+    setShadeCanopyMask(nextShade);
+    setSolarCanopyMask(nextSolar);
+    setShadeCanopyIcons([]);
+    setSolarCanopyIcons([]);
+    setSelectedTreeId(null);
+    setActionHistory([]);
+    setAutoresearchCandidate(iteration);
+    setAutoresearchRunId(runId);
+    setAutoresearchLayoutReady(true);
+    setSimulationResult(null);
+    setSimulationJob(null);
+    setSimulationError(null);
+    const archived = iteration.objectives ?? {};
+    const archivedObjectives: PolicyScoreObjectives = {
+      heat_relief_c: archived.heat_relief_c ?? iteration.fitness ?? null,
+      expected_relief_c: archived.expected_relief_c ?? null,
+      access_gain_pp: archived.access_gain_pp ?? null,
+      equity_ratio: archived.equity_ratio ?? null,
+      equity_relief_c: archived.equity_relief_c ?? null,
+      equity_pop_share: archived.equity_pop_share ?? null,
+      equity_aois: archived.equity_aois ?? 0,
+      cobenefit_greened_pct: archived.cobenefit_greened_pct ?? null,
+      cost_efficiency_person_c_per_100k: archived.cost_efficiency_person_c_per_100k ?? null,
+      tmrt_relief_c: archived.tmrt_relief_c ?? null,
+      plan_survival: archived.plan_survival ?? null,
+      pv_mwh_per_yr: archived.pv_mwh_per_yr ?? null,
+      spend_usd: archived.spend_usd ?? null,
+    };
+    setPolicyScore({
+      verdict: "feasible",
+      objectives: archivedObjectives,
+      violations: {},
+      run: {
+        scenarios: archive.run?.scenarios ?? ["baseline"],
+        resolution_m: archive.run?.resolution_m ?? layout.resolution_m,
+        hours: [10, 13, 16],
+        horizon_years: null,
+      },
+    });
+    if (archive.run?.budget_usd_per_aoi ?? archive.run?.budget_usd) {
+      setPolicyScoringBudget(Number(archive.run?.budget_usd_per_aoi ?? archive.run?.budget_usd));
+    }
+    setPolicyScoreJob(null);
+    autoresearchSimulationAttempt.current = null;
+  }, [maskFromArchive]);
+
+  const clearAutoresearchLayout = useCallback((iteration: ArchiveIteration | null, runId: string | null) => {
+    const width = manifest?.width ?? DEFAULT_GRID_SIZE;
+    const height = manifest?.height ?? DEFAULT_GRID_SIZE;
+    const empty = () => emptyRasterMask(width, height);
+    const nextReflective = empty();
+    const nextCool = empty();
+    const nextGreen = empty();
+    const nextDepaved = empty();
+    const nextShade = empty();
+    const nextSolar = empty();
+    treesRef.current = [];
+    reflectiveMaskRef.current = nextReflective;
+    coolRoofMaskRef.current = nextCool;
+    greenRoofMaskRef.current = nextGreen;
+    depavedMaskRef.current = nextDepaved;
+    shadeCanopyMaskRef.current = nextShade;
+    solarCanopyMaskRef.current = nextSolar;
+    setTrees([]);
+    setReflectiveMask(nextReflective);
+    setCoolRoofMask(nextCool);
+    setGreenRoofMask(nextGreen);
+    setDepavedMask(nextDepaved);
+    setShadeCanopyMask(nextShade);
+    setSolarCanopyMask(nextSolar);
+    setShadeCanopyIcons([]);
+    setSolarCanopyIcons([]);
+    setAutoresearchCandidate(iteration);
+    setAutoresearchRunId(runId);
+    setAutoresearchLayoutReady(false);
+    setSimulationResult(null);
+    setSimulationJob(null);
+    setPolicyScore(null);
+    setPolicyScoreJob(null);
+    autoresearchSimulationAttempt.current = null;
+  }, [manifest?.height, manifest?.width]);
+
+  const restoreEditableWorkspace = useCallback(() => {
+    const width = manifest?.width ?? DEFAULT_GRID_SIZE;
+    const height = manifest?.height ?? DEFAULT_GRID_SIZE;
+    const nextTrees = loadTrees();
+    const nextReflective = loadRasterMask(REFLECTIVE_STORAGE_KEY, width, height);
+    const nextCoolRoof = loadRasterMask(COOL_ROOF_STORAGE_KEY, width, height);
+    const nextGreenRoof = loadRasterMask(GREEN_ROOF_STORAGE_KEY, width, height);
+    const nextDepaved = loadRasterMask(DEPAVED_STORAGE_KEY, width, height);
+    const nextShade = loadRasterMask(SHADE_CANOPY_STORAGE_KEY, width, height);
+    const nextSolar = loadRasterMask(SOLAR_CANOPY_STORAGE_KEY, width, height);
+    treesRef.current = nextTrees;
+    reflectiveMaskRef.current = nextReflective;
+    coolRoofMaskRef.current = nextCoolRoof;
+    greenRoofMaskRef.current = nextGreenRoof;
+    depavedMaskRef.current = nextDepaved;
+    shadeCanopyMaskRef.current = nextShade;
+    solarCanopyMaskRef.current = nextSolar;
+    setTrees(nextTrees);
+    setReflectiveMask(nextReflective);
+    setCoolRoofMask(nextCoolRoof);
+    setGreenRoofMask(nextGreenRoof);
+    setDepavedMask(nextDepaved);
+    setShadeCanopyMask(nextShade);
+    setSolarCanopyMask(nextSolar);
+    setShadeCanopyIcons(loadShadeCanopyIcons());
+    setSolarCanopyIcons(loadSolarCanopyIcons());
+    setSimulationResult(loadSimulation());
+    setPolicyScore(loadPolicyScore());
+    setAutoresearchCandidate(null);
+    setAutoresearchRunId(null);
+    setAutoresearchLayoutReady(false);
+    setSelectedTreeId(null);
+    setActionHistory([]);
+  }, [manifest?.height, manifest?.width]);
+
+  const enableAutoresearch = useCallback(() => {
+    autoresearchModeRef.current = true;
+    localStorage.setItem(AUTORESEARCH_MODE_STORAGE_KEY, "true");
+    setPlacementMode(false);
+    setBrushMode(false);
+    setRemovalMode(false);
+    setReflectiveBrushMode(false);
+    setReflectiveSegmentMode(false);
+    setReflectiveEraseMode(false);
+    setDepaveBrushMode(false);
+    setDepaveBoxMode(false);
+    setDepaveEraseMode(false);
+    setShadeCanopySegmentMode(false);
+    setShadeCanopyBrushMode(false);
+    setShadeCanopyEraseMode(false);
+    setSolarCanopySegmentMode(false);
+    setSolarCanopyBrushMode(false);
+    setSolarCanopyEraseMode(false);
+    setCoolRoofClickMode(false);
+    setCoolRoofBrushMode(false);
+    setCoolRoofBoxMode(false);
+    setCoolRoofEraseMode(false);
+    clearAutoresearchLayout(null, null);
+    setAutoresearchMode(true);
+    setPanelOpen(true);
+  }, [clearAutoresearchLayout]);
+
+  const disableAutoresearch = useCallback(() => {
+    autoresearchModeRef.current = false;
+    localStorage.removeItem(AUTORESEARCH_MODE_STORAGE_KEY);
+    setAutoresearchMode(false);
+    restoreEditableWorkspace();
+  }, [restoreEditableWorkspace]);
+
+  const copyAutoresearchToDesign = useCallback(() => {
+    if (!autoresearchLayoutReady) return;
+    localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(treesRef.current));
+    storeRasterMask(REFLECTIVE_STORAGE_KEY, reflectiveMaskRef.current);
+    storeRasterMask(COOL_ROOF_STORAGE_KEY, coolRoofMaskRef.current);
+    storeRasterMask(GREEN_ROOF_STORAGE_KEY, greenRoofMaskRef.current);
+    storeRasterMask(DEPAVED_STORAGE_KEY, depavedMaskRef.current);
+    storeRasterMask(SHADE_CANOPY_STORAGE_KEY, shadeCanopyMaskRef.current);
+    storeRasterMask(SOLAR_CANOPY_STORAGE_KEY, solarCanopyMaskRef.current);
+    if (shadeCanopyIcons.length) localStorage.setItem(SHADE_CANOPY_ICONS_STORAGE_KEY, JSON.stringify(shadeCanopyIcons));
+    else localStorage.removeItem(SHADE_CANOPY_ICONS_STORAGE_KEY);
+    if (solarCanopyIcons.length) localStorage.setItem(SOLAR_CANOPY_ICONS_STORAGE_KEY, JSON.stringify(solarCanopyIcons));
+    else localStorage.removeItem(SOLAR_CANOPY_ICONS_STORAGE_KEY);
+    if (simulationResult) localStorage.setItem(SIMULATION_STORAGE_KEY, JSON.stringify(simulationResult));
+    else localStorage.removeItem(SIMULATION_STORAGE_KEY);
+    localStorage.removeItem(POLICY_SCORE_STORAGE_KEY);
+    localStorage.removeItem(AUTORESEARCH_MODE_STORAGE_KEY);
+    autoresearchModeRef.current = false;
+    setAutoresearchMode(false);
+    setAutoresearchCandidate(null);
+    setAutoresearchRunId(null);
+    setAutoresearchLayoutReady(false);
+    setActiveView("design");
+    setComparisonActive(false);
+    setPlacementNotice("Archived policy copied into this editable workspace.");
+  }, [autoresearchLayoutReady, shadeCanopyIcons, simulationResult, solarCanopyIcons]);
+
+  const selectAutoresearchAoi = useCallback((aoi: string) => {
+    if (!/^[a-z0-9_]+$/.test(aoi) || aoi === ACTIVE_AOI) return;
+    localStorage.setItem(STUDY_AREA_STORAGE_KEY, aoi);
+    window.location.reload();
+  }, []);
+
+  useEffect(() => {
+    if (autoresearchMode && !autoresearchCandidate && !autoresearchLayoutReady) {
+      clearAutoresearchLayout(null, null);
+    }
+  }, [autoresearchCandidate, autoresearchLayoutReady, autoresearchMode, clearAutoresearchLayout]);
+
+  useEffect(() => {
+    fetch(`${dataRoot}/manifest.json`)
       .then((response) => {
-        if (!response.ok) throw new Error("Chinatown layer manifest is unavailable");
+        if (!response.ok) throw new Error("Study-area layer manifest is unavailable");
         return response.json();
       })
-      .then(setManifest)
+      .then((loaded: Manifest) => {
+        strictWorkspaceSanitized.current = false;
+        setManifest(loaded);
+        if (autoresearchModeRef.current) return;
+        setReflectiveMask(loadRasterMask(REFLECTIVE_STORAGE_KEY, loaded.width, loaded.height));
+        setCoolRoofMask(loadRasterMask(COOL_ROOF_STORAGE_KEY, loaded.width, loaded.height));
+        setGreenRoofMask(loadRasterMask(GREEN_ROOF_STORAGE_KEY, loaded.width, loaded.height));
+        setDepavedMask(loadRasterMask(DEPAVED_STORAGE_KEY, loaded.width, loaded.height));
+        setShadeCanopyMask(loadRasterMask(SHADE_CANOPY_STORAGE_KEY, loaded.width, loaded.height));
+        setSolarCanopyMask(loadRasterMask(SOLAR_CANOPY_STORAGE_KEY, loaded.width, loaded.height));
+      })
       .catch(() => setManifest(null));
-  }, []);
+  }, [dataRoot]);
 
   useEffect(() => {
     setSolweigBaseline(null);
@@ -557,27 +938,20 @@ function App() {
     if (!manifest) return;
     let cancelled = false;
     setPlacementMaskStatus("loading");
-    const image = new Image();
-    image.onload = () => {
+    Promise.all([
+      loadPlacementMask(`${dataRoot}/${manifest.layers?.tree_placement_mask ?? "tree_placement_mask.png"}`),
+      loadPlacementMask(`${dataRoot}/${manifest.layers?.tree_small_placeable_mask ?? "placeable_tree_small.png"}`),
+      loadPlacementMask(`${dataRoot}/${manifest.layers?.tree_medium_placeable_mask ?? "placeable_tree_medium.png"}`),
+    ]).then(([physical, small, medium]) => {
       if (cancelled) return;
-      const canvas = document.createElement("canvas");
-      canvas.width = image.naturalWidth;
-      canvas.height = image.naturalHeight;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) {
-        setPlacementMaskStatus("error");
-        return;
-      }
-      context.drawImage(image, 0, 0);
-      setPlacementMask({ width: canvas.width, height: canvas.height, pixels: context.getImageData(0, 0, canvas.width, canvas.height).data });
+      setPlacementMask(physical);
+      setTreePlaceableMasks({ small, medium });
       setPlacementMaskStatus("ready");
-    };
-    image.onerror = () => {
+    }).catch(() => {
       if (!cancelled) setPlacementMaskStatus("error");
-    };
-    image.src = `/data/chinatown/${manifest.layers?.tree_placement_mask ?? "tree_placement_mask.png"}`;
+    });
     return () => { cancelled = true; };
-  }, [manifest]);
+  }, [manifest, dataRoot]);
 
   useEffect(() => {
     if (!manifest) return;
@@ -651,9 +1025,54 @@ function App() {
       setDepavableMaskStatus("ready");
     };
     image.onerror = () => { if (!cancelled) setDepavableMaskStatus("error"); };
-    image.src = `/data/chinatown/${manifest.layers?.depavable_mask ?? "depavable_mask.png"}`;
+    image.src = `${dataRoot}/${manifest.layers?.depavable_mask ?? "depavable_mask.png"}`;
     return () => { cancelled = true; };
-  }, [manifest]);
+  }, [manifest, dataRoot]);
+
+  useEffect(() => {
+    if (!manifest) return;
+    let cancelled = false;
+    Promise.all([
+      loadPlacementMask(`${dataRoot}/${manifest.layers?.shade_canopy_placeable_mask ?? "placeable_shade_canopy.png"}`),
+      loadPlacementMask(`${dataRoot}/${manifest.layers?.solar_canopy_placeable_mask ?? "placeable_solar_canopy.png"}`),
+    ]).then(([shade, solar]) => {
+      if (cancelled) return;
+      setShadeCanopyPlaceableMask(shade);
+      setSolarCanopyPlaceableMask(solar);
+      const sanitize = (
+        current: RasterMask,
+        allowed: PlacementMask,
+        conflict?: RasterMask,
+      ) => {
+        const bits = current.bits.slice();
+        let removed = 0;
+        for (let pixel = 0; pixel < current.width * current.height; pixel += 1) {
+          if (!hasMaskPixel(current, pixel)) continue;
+          const point = { x: (pixel % current.width) + 0.5, y: Math.floor(pixel / current.width) + 0.5 };
+          const valid = placementMaskHasPoint(allowed, point, current.width, current.height);
+          if (valid && (!conflict || !hasMaskPixel(conflict, pixel))) continue;
+          writeMaskPixel(bits, pixel, false);
+          removed += 1;
+        }
+        return removed ? { ...current, bits, count: current.count - removed } : current;
+      };
+      setShadeCanopyMask((current) => {
+        const next = sanitize(current, shade);
+        shadeCanopyMaskRef.current = next;
+        if (next !== current) setPlacementNotice(`Removed ${(current.count - next.count).toLocaleString()} saved shade-canopy pixels that fail strict siting rules.`);
+        return next;
+      });
+      setSolarCanopyMask((current) => {
+        const next = sanitize(current, solar, shadeCanopyMaskRef.current);
+        solarCanopyMaskRef.current = next;
+        if (next !== current) setPlacementNotice(`Removed ${(current.count - next.count).toLocaleString()} saved PV-canopy pixels that fail strict siting or overlap shade canopy.`);
+        return next;
+      });
+    }).catch(() => {
+      if (!cancelled) setDepavableMaskStatus("error");
+    });
+    return () => { cancelled = true; };
+  }, [manifest, dataRoot]);
 
   useEffect(() => {
     if (!manifest) return;
@@ -728,9 +1147,9 @@ function App() {
       setRoofRegionsStatus("ready");
     };
     image.onerror = () => { if (!cancelled) setRoofRegionsStatus("error"); };
-    image.src = `/data/chinatown/${manifest.layers?.roof_regions ?? "roof_regions.png"}`;
+    image.src = `${dataRoot}/${manifest.layers?.roof_regions ?? "roof_regions.png"}`;
     return () => { cancelled = true; };
-  }, [manifest]);
+  }, [manifest, dataRoot]);
 
   useEffect(() => {
     if (!manifest) return;
@@ -786,9 +1205,9 @@ function App() {
       setPavementMaskStatus("ready");
     };
     pavementImage.onerror = () => { if (!cancelled) setPavementMaskStatus("error"); };
-    pavementImage.src = `/data/chinatown/${manifest.layers?.pavement_mask ?? "pavement_mask.png"}`;
+    pavementImage.src = `${dataRoot}/${manifest.layers?.pavement_mask ?? "pavement_mask.png"}`;
 
-    fetch(`/data/chinatown/${manifest.layers?.street_segments ?? "street_segments.json"}`)
+    fetch(`${dataRoot}/${manifest.layers?.street_segments ?? "street_segments.json"}`)
       .then((response) => {
         if (!response.ok) throw new Error("Street segments unavailable");
         return response.json();
@@ -796,13 +1215,112 @@ function App() {
       .then((value: { segments?: StreetSegment[] }) => { if (!cancelled) setStreetSegments(value.segments ?? []); })
       .catch(() => { if (!cancelled) setStreetSegments([]); });
     return () => { cancelled = true; };
-  }, [manifest]);
+  }, [manifest, dataRoot]);
 
   useEffect(() => {
+    treesRef.current = trees;
+    if (autoresearchModeRef.current) return;
     if (trees.length) localStorage.setItem(TREE_STORAGE_KEY, JSON.stringify(trees));
     else localStorage.removeItem(TREE_STORAGE_KEY);
-    treesRef.current = trees;
   }, [trees]);
+
+  useEffect(() => {
+    if (
+      autoresearchModeRef.current
+      ||
+      strictWorkspaceSanitized.current
+      || !manifest
+      || !placementMask
+      || !treePlaceableMasks.small
+      || !treePlaceableMasks.medium
+      || !shadeCanopyPlaceableMask
+      || !solarCanopyPlaceableMask
+      || pavementMaskStatus !== "ready"
+      || depavableMaskStatus !== "ready"
+      || roofRegionsStatus !== "ready"
+    ) return;
+    strictWorkspaceSanitized.current = true;
+
+    const acceptedTrees: TreeIntervention[] = [];
+    const occupiedPixels = new Set<number>();
+    let removedTrees = 0;
+    for (const tree of treesRef.current) {
+      const strictMask = treePlaceableMasks[tree.size];
+      const col = Math.floor(tree.x);
+      const row = Math.floor(tree.y);
+      const pixel = row * manifest.width + col;
+      if (!strictMask || !placementMaskHasPoint(strictMask, tree, manifest.width, manifest.height) || occupiedPixels.has(pixel)) {
+        removedTrees += 1;
+        continue;
+      }
+      occupiedPixels.add(pixel);
+      acceptedTrees.push(tree);
+    }
+    if (removedTrees) {
+      treesRef.current = acceptedTrees;
+      setTrees(acceptedTrees);
+    }
+
+    const clearPixels = (current: RasterMask, forbidden: Set<number>) => {
+      const bits = current.bits.slice();
+      let removed = 0;
+      for (const pixel of forbidden) {
+        if (!hasMaskPixel(current, pixel)) continue;
+        writeMaskPixel(bits, pixel, false);
+        removed += 1;
+      }
+      return removed ? { ...current, bits, count: current.count - removed } : current;
+    };
+    const clearMaskOverlap = (current: RasterMask, conflict: RasterMask) => {
+      const bits = current.bits.slice();
+      let removed = 0;
+      for (let pixel = 0; pixel < current.width * current.height; pixel += 1) {
+        if (!hasMaskPixel(current, pixel) || !hasMaskPixel(conflict, pixel)) continue;
+        writeMaskPixel(bits, pixel, false);
+        removed += 1;
+      }
+      return { mask: removed ? { ...current, bits, count: current.count - removed } : current, removed };
+    };
+
+    // Preserve existing trees, reflective pavement, cool roofs, and fabric
+    // canopies when repairing legacy same-layer conflicts.
+    const depavedRepair = clearMaskOverlap(depavedMaskRef.current, reflectiveMaskRef.current);
+    const depaved = depavedRepair.mask;
+    if (depaved !== depavedMaskRef.current) {
+      depavedMaskRef.current = depaved;
+      setDepavedMask(depaved);
+    }
+    const greenRepair = clearMaskOverlap(greenRoofMaskRef.current, coolRoofMaskRef.current);
+    const green = greenRepair.mask;
+    if (green !== greenRoofMaskRef.current) {
+      greenRoofMaskRef.current = green;
+      setGreenRoofMask(green);
+    }
+    const solarForbidden = new Set(occupiedPixels);
+    for (let pixel = 0; pixel < shadeCanopyMaskRef.current.width * shadeCanopyMaskRef.current.height; pixel += 1) {
+      if (hasMaskPixel(shadeCanopyMaskRef.current, pixel)) solarForbidden.add(pixel);
+    }
+    const solarBefore = solarCanopyMaskRef.current;
+    const solar = clearPixels(solarBefore, solarForbidden);
+    if (solar !== solarCanopyMaskRef.current) {
+      solarCanopyMaskRef.current = solar;
+      setSolarCanopyMask(solar);
+    }
+    const shadeBefore = shadeCanopyMaskRef.current;
+    const shade = clearPixels(shadeBefore, occupiedPixels);
+    if (shade !== shadeCanopyMaskRef.current) {
+      shadeCanopyMaskRef.current = shade;
+      setShadeCanopyMask(shade);
+    }
+
+    const repairedPixels = depavedRepair.removed
+      + greenRepair.removed
+      + (solarBefore.count - solar.count)
+      + (shadeBefore.count - shade.count);
+    if (removedTrees || repairedPixels) {
+      setPlacementNotice(`Strict feasibility repaired ${removedTrees} tree${removedTrees === 1 ? "" : "s"}${repairedPixels ? ` and ${repairedPixels.toLocaleString()} conflicting pixels` : ""} from the saved layout.`);
+    }
+  }, [manifest, placementMask, treePlaceableMasks, shadeCanopyPlaceableMask, solarCanopyPlaceableMask, pavementMaskStatus, depavableMaskStatus, roofRegionsStatus]);
 
   useEffect(() => {
     const count = countMaskPixels(reflectiveMask.bits, reflectiveMask.width, reflectiveMask.height);
@@ -813,6 +1331,7 @@ function App() {
       return;
     }
     reflectiveMaskRef.current = reflectiveMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(REFLECTIVE_STORAGE_KEY, reflectiveMask);
   }, [reflectiveMask]);
 
@@ -825,6 +1344,7 @@ function App() {
       return;
     }
     depavedMaskRef.current = depavedMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(DEPAVED_STORAGE_KEY, depavedMask);
   }, [depavedMask]);
 
@@ -837,10 +1357,12 @@ function App() {
       return;
     }
     shadeCanopyMaskRef.current = shadeCanopyMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(SHADE_CANOPY_STORAGE_KEY, shadeCanopyMask);
   }, [shadeCanopyMask]);
 
   useEffect(() => {
+    if (autoresearchModeRef.current) return;
     if (shadeCanopyIcons.length) localStorage.setItem(SHADE_CANOPY_ICONS_STORAGE_KEY, JSON.stringify(shadeCanopyIcons));
     else localStorage.removeItem(SHADE_CANOPY_ICONS_STORAGE_KEY);
   }, [shadeCanopyIcons]);
@@ -849,7 +1371,7 @@ function App() {
     if (!shadeCanopyPixelCount || shadeCanopyIcons.length) return;
     const blocked = new Uint8Array(shadeCanopyMask.width * shadeCanopyMask.height);
     const generated: ShadeCanopyIcon[] = [];
-    const radius = SHADE_CANOPY_ICON_SPACING_M;
+    const radius = SHADE_CANOPY_ICON_SPACING_M / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     for (let pixel = 0; pixel < shadeCanopyMask.width * shadeCanopyMask.height; pixel += 1) {
       if (blocked[pixel] || !hasMaskPixel(shadeCanopyMask, pixel)) continue;
       const x = pixel % shadeCanopyMask.width;
@@ -864,7 +1386,7 @@ function App() {
       }
     }
     setShadeCanopyIcons(generated);
-  }, [shadeCanopyPixelCount, shadeCanopyIcons.length, shadeCanopyMask]);
+  }, [shadeCanopyPixelCount, shadeCanopyIcons.length, shadeCanopyMask, manifest?.resolution_m]);
 
   useEffect(() => {
     const count = countMaskPixels(solarCanopyMask.bits, solarCanopyMask.width, solarCanopyMask.height);
@@ -875,10 +1397,12 @@ function App() {
       return;
     }
     solarCanopyMaskRef.current = solarCanopyMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(SOLAR_CANOPY_STORAGE_KEY, solarCanopyMask);
   }, [solarCanopyMask]);
 
   useEffect(() => {
+    if (autoresearchModeRef.current) return;
     if (solarCanopyIcons.length) localStorage.setItem(SOLAR_CANOPY_ICONS_STORAGE_KEY, JSON.stringify(solarCanopyIcons));
     else localStorage.removeItem(SOLAR_CANOPY_ICONS_STORAGE_KEY);
   }, [solarCanopyIcons]);
@@ -907,7 +1431,7 @@ function App() {
     if (!solarCanopyPixelCount || solarCanopyIcons.length) return;
     const blocked = new Uint8Array(solarCanopyMask.width * solarCanopyMask.height);
     const generated: ShadeCanopyIcon[] = [];
-    const radius = SHADE_CANOPY_ICON_SPACING_M;
+    const radius = SHADE_CANOPY_ICON_SPACING_M / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     for (let pixel = 0; pixel < solarCanopyMask.width * solarCanopyMask.height; pixel += 1) {
       if (blocked[pixel] || !hasMaskPixel(solarCanopyMask, pixel)) continue;
       const x = pixel % solarCanopyMask.width;
@@ -922,7 +1446,7 @@ function App() {
       }
     }
     setSolarCanopyIcons(generated);
-  }, [solarCanopyPixelCount, solarCanopyIcons.length, solarCanopyMask]);
+  }, [solarCanopyPixelCount, solarCanopyIcons.length, solarCanopyMask, manifest?.resolution_m]);
 
   useEffect(() => {
     const count = countMaskPixels(coolRoofMask.bits, coolRoofMask.width, coolRoofMask.height);
@@ -933,6 +1457,7 @@ function App() {
       return;
     }
     coolRoofMaskRef.current = coolRoofMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(COOL_ROOF_STORAGE_KEY, coolRoofMask);
   }, [coolRoofMask]);
 
@@ -945,11 +1470,12 @@ function App() {
       return;
     }
     greenRoofMaskRef.current = greenRoofMask;
+    if (autoresearchModeRef.current) return;
     storeRasterMask(GREEN_ROOF_STORAGE_KEY, greenRoofMask);
   }, [greenRoofMask]);
 
   useEffect(() => {
-    fetch("/api/solweig/availability")
+    fetch(`/api/solweig/availability?aoi=${encodeURIComponent(ACTIVE_AOI)}`)
       .then((response) => response.json())
       .then((availability) => {
         setSimulationReady(Boolean(availability.ready));
@@ -961,6 +1487,22 @@ function App() {
       .catch(() => {
         setSimulationReady(false);
         setSimulationChecked(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    fetch(`/api/scoring/availability?aoi=${encodeURIComponent(ACTIVE_AOI)}`)
+      .then((response) => response.json())
+      .then((availability) => {
+        setPolicyScoringReady(Boolean(availability.ready));
+        setPolicyScoringChecked(true);
+        if (availability.active_job_id) {
+          setPolicyScoreJob({ id: availability.active_job_id, state: "running", stage: "Reconnecting to policy score", progress: 0 });
+        }
+      })
+      .catch(() => {
+        setPolicyScoringReady(false);
+        setPolicyScoringChecked(true);
       });
   }, []);
 
@@ -981,7 +1523,7 @@ function App() {
             setBaselineLoadState("ready");
           } else {
             setSimulationResult(status.result);
-            localStorage.setItem(SIMULATION_STORAGE_KEY, JSON.stringify(status.result));
+            if (!autoresearchModeRef.current) localStorage.setItem(SIMULATION_STORAGE_KEY, JSON.stringify(status.result));
             setSimulationSetupOpen(false);
           }
           setSimulationError(null);
@@ -997,6 +1539,32 @@ function App() {
     const interval = window.setInterval(poll, 1200);
     return () => { cancelled = true; window.clearInterval(interval); };
   }, [simulationJob?.id, simulationJob?.state]);
+
+  useEffect(() => {
+    if (!policyScoreJob || !["queued", "running"].includes(policyScoreJob.state)) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/scoring/status/${policyScoreJob.id}`);
+        if (!response.ok) throw new Error("Unable to read policy scoring progress");
+        const status = await response.json() as PolicyScoreJob;
+        if (cancelled) return;
+        setPolicyScoreJob(status);
+        if (status.state === "complete" && status.result) {
+          setPolicyScore(status.result);
+          localStorage.setItem(POLICY_SCORE_STORAGE_KEY, JSON.stringify(status.result));
+          setPolicyScoreError(null);
+        } else if (status.state === "failed") {
+          setPolicyScoreError(status.error ?? "Policy scoring did not complete.");
+        }
+      } catch (error) {
+        if (!cancelled) setPolicyScoreError(error instanceof Error ? error.message : "Unable to read policy scoring progress");
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 1200);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [policyScoreJob?.id, policyScoreJob?.state]);
 
   useEffect(() => {
     if (!placementNotice) return;
@@ -1077,21 +1645,31 @@ function App() {
   const depavedMaskEncoded = useMemo(() => encodeMaskBits(depavedMask.bits), [depavedMask.bits]);
   const shadeCanopyMaskEncoded = useMemo(() => encodeMaskBits(shadeCanopyMask.bits), [shadeCanopyMask.bits]);
   const solarCanopyMaskEncoded = useMemo(() => encodeMaskBits(solarCanopyMask.bits), [solarCanopyMask.bits]);
+  const policyLayoutSignature = useMemo(() => compactFingerprint([
+    treeSignature(trees),
+    reflectiveMaskEncoded,
+    coolRoofMaskEncoded,
+    greenRoofMaskEncoded,
+    depavedMaskEncoded,
+    shadeCanopyMaskEncoded,
+    solarCanopyMaskEncoded,
+  ].join("|")), [trees, reflectiveMaskEncoded, coolRoofMaskEncoded, greenRoofMaskEncoded, depavedMaskEncoded, shadeCanopyMaskEncoded, solarCanopyMaskEncoded]);
   const simulationReflectiveMask = useMemo(() => {
     const snapshot = simulationResult?.reflective_snapshot;
     if (!snapshot) return emptyRasterMask(reflectiveMask.width, reflectiveMask.height);
     const bits = decodeMaskBits(snapshot.data);
     return { width: snapshot.width, height: snapshot.height, count: countMaskPixels(bits, snapshot.width, snapshot.height), bits };
   }, [simulationResult?.reflective_snapshot, reflectiveMask.width, reflectiveMask.height]);
-  const reflectiveAreaM2 = reflectivePixelCount * (manifest?.resolution_m ?? 1) ** 2;
-  const coolRoofAreaM2 = coolRoofPixelCount * (manifest?.resolution_m ?? 1) ** 2;
-  const greenRoofAreaM2 = greenRoofPixelCount * (manifest?.resolution_m ?? 1) ** 2;
-  const depavedAreaM2 = depavedPixelCount * (manifest?.resolution_m ?? 1) ** 2;
-  const shadeCanopyAreaM2 = shadeCanopyPixelCount * (manifest?.resolution_m ?? 1) ** 2;
-  const solarCanopyAreaM2 = solarCanopyPixelCount * (manifest?.resolution_m ?? 1) ** 2;
+  const pixelAreaM2 = (count: number) => Math.round(count * (manifest?.resolution_m ?? DEFAULT_RESOLUTION_M) ** 2);
+  const reflectiveAreaM2 = pixelAreaM2(reflectivePixelCount);
+  const coolRoofAreaM2 = pixelAreaM2(coolRoofPixelCount);
+  const greenRoofAreaM2 = pixelAreaM2(greenRoofPixelCount);
+  const depavedAreaM2 = pixelAreaM2(depavedPixelCount);
+  const shadeCanopyAreaM2 = pixelAreaM2(shadeCanopyPixelCount);
+  const solarCanopyAreaM2 = pixelAreaM2(solarCanopyPixelCount);
   const hasInterventions = trees.length > 0 || reflectivePixelCount > 0 || coolRoofPixelCount > 0 || greenRoofPixelCount > 0 || depavedPixelCount > 0 || shadeCanopyPixelCount > 0 || solarCanopyPixelCount > 0;
   const metricDefinition = METRICS[metric];
-  const studyAreaPixelCount = Math.max((manifest?.width ?? 1001) * (manifest?.height ?? 1001), 1);
+  const studyAreaPixelCount = Math.max((manifest?.width ?? DEFAULT_GRID_SIZE) * (manifest?.height ?? DEFAULT_GRID_SIZE), 1);
   const metricMeanPixelCount = (selectedMetric: MetricKey) => selectedMetric === "utci"
     ? Math.max(manifest?.summary_masks?.perceived_temperature_pixels ?? studyAreaPixelCount, 1)
     : studyAreaPixelCount;
@@ -1100,7 +1678,7 @@ function App() {
     const presetDiameter = tree.size === "small" ? 3 : 5;
     const sizeScale = Math.min(1.6, Math.max(0.55, Math.sqrt(tree.crownDiameterM / presetDiameter) * Math.sqrt(tree.heightM / 5)));
     const peak = (tree.size === "small" ? definition.small : definition.medium) * sizeScale;
-    const sigma = Math.max(12, tree.crownDiameterM * 3.4);
+    const sigma = Math.max(12, tree.crownDiameterM * 3.4) / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     return sum + peak * 2 * Math.PI * sigma * sigma / metricMeanPixelCount(selectedMetric);
   }, 0);
   const reflectiveFastEffect = reflectivePixelCount ? REFLECTIVE_LOCAL_EFFECT[metric] : 0;
@@ -1119,12 +1697,14 @@ function App() {
   };
   const simulationMatchesConditions = Boolean(
     simulationResult
+    && simulationResult.aoi === ACTIVE_AOI
     && simulationResult.scenario === scenario
     && simulationResult.date === "07-27"
     && simulationResult.hour === simulationHour,
   );
   const baselineMatchesConditions = Boolean(
     solweigBaseline
+    && solweigBaseline.aoi === ACTIVE_AOI
     && solweigBaseline.scenario === scenario
     && solweigBaseline.date === "07-27"
     && solweigBaseline.hour === simulationHour,
@@ -1197,20 +1777,36 @@ function App() {
     : estimateValue * (1 + uncertaintyFraction);
   const smallTreeCount = trees.filter((tree) => tree.size === "small").length;
   const mediumTreeCount = trees.length - smallTreeCount;
-  const reflectiveCostEstimate = reflectiveAreaM2 * 8;
-  const coolRoofCostEstimate = coolRoofAreaM2 * 25;
-  const greenRoofCostEstimate = greenRoofAreaM2 * 250;
-  const depavedCostEstimate = depavedAreaM2 * 90;
-  const shadeCanopyCostEstimate = shadeCanopyAreaM2 * 200;
-  const solarCanopyCostEstimate = solarCanopyAreaM2 * 450;
-  const costEstimate = smallTreeCount * TREE_COST.small + mediumTreeCount * TREE_COST.medium + reflectiveCostEstimate + coolRoofCostEstimate + greenRoofCostEstimate + depavedCostEstimate + shadeCanopyCostEstimate + solarCanopyCostEstimate;
+  const unitCost = (action: PolicyAction) => manifest?.interventions?.[action]?.cost_usd_per_unit ?? FALLBACK_UNIT_COSTS[action];
+  const treeCost = { small: unitCost("tree_small"), medium: unitCost("tree_medium") };
+  const reflectiveCostEstimate = reflectiveAreaM2 * unitCost("light_road");
+  const coolRoofCostEstimate = coolRoofAreaM2 * unitCost("cool_roof");
+  const greenRoofCostEstimate = greenRoofAreaM2 * unitCost("green_roof");
+  const depavedCostEstimate = depavedAreaM2 * unitCost("grass_conversion");
+  const shadeCanopyCostEstimate = shadeCanopyAreaM2 * unitCost("shade_canopy");
+  const solarCanopyCostEstimate = solarCanopyAreaM2 * unitCost("solar_canopy");
+  const costEstimate = smallTreeCount * treeCost.small + mediumTreeCount * treeCost.medium + reflectiveCostEstimate + coolRoofCostEstimate + greenRoofCostEstimate + depavedCostEstimate + shadeCanopyCostEstimate + solarCanopyCostEstimate;
+  const budgetExceeded = costEstimate > policyScoringBudget + 0.000001;
+  const workspaceSpend = () => {
+    const area = (manifest?.resolution_m ?? DEFAULT_RESOLUTION_M) ** 2;
+    return treesRef.current.reduce((sum, tree) => sum + treeCost[tree.size], 0)
+      + reflectiveMaskRef.current.count * area * unitCost("light_road")
+      + coolRoofMaskRef.current.count * area * unitCost("cool_roof")
+      + greenRoofMaskRef.current.count * area * unitCost("green_roof")
+      + depavedMaskRef.current.count * area * unitCost("grass_conversion")
+      + shadeCanopyMaskRef.current.count * area * unitCost("shade_canopy")
+      + solarCanopyMaskRef.current.count * area * unitCost("solar_canopy");
+  };
   const costLow = costEstimate * 0.65;
   const costHigh = costEstimate * 1.35;
   const addedCanopyArea = trees.reduce((sum, tree) => sum + Math.PI * (tree.crownDiameterM / 2) ** 2, 0);
   const resultVisible = activeView === "results";
-  const resultDataReady = simulationMatchesConditions || baselineMatchesConditions;
+  const resultDataReady = autoresearchMode && hasInterventions
+    ? Boolean(simulationMatchesConditions && simulationMatchesLayout)
+    : simulationMatchesConditions || baselineMatchesConditions;
   const resultRasterVisible = resultVisible && resultDataReady;
-  const resultsUnavailable = resultVisible && !resultDataReady && simulationChecked && (!simulationReady || baselineLoadState === "error");
+  const autoresearchSimulationFailed = Boolean(autoresearchMode && simulationJob && ["failed", "cancelled"].includes(simulationJob.state));
+  const resultsUnavailable = resultVisible && !resultDataReady && simulationChecked && (!simulationReady || baselineLoadState === "error" || autoresearchSimulationFailed);
   const resultsAwaitingSolweig = resultVisible && !resultDataReady && !resultsUnavailable;
   const activeSimulationRunning = Boolean(simulationJob && ["queued", "running"].includes(simulationJob.state));
   const metricDisplayMin = simulatedMetric?.display_min ?? baselineMetric?.display_min ?? manifest?.screening_metrics?.metrics[metric].display_min;
@@ -1254,6 +1850,14 @@ function App() {
   const roofRequiresSimulation = coolRoofRequiresSimulation || greenRoofRequiresSimulation;
   const resultRequiresSimulation = reflectiveMrtRequiresSimulation || roofRequiresSimulation || depavedRequiresSimulation || shadeCanopyRequiresSimulation || solarCanopyRequiresSimulation;
   const resultHeroValue = existingConditionsOnly && baselineMetric ? baselineMetric.baseline_mean : estimateValue;
+  const policyScoreRunning = Boolean(policyScoreJob && ["queued", "running"].includes(policyScoreJob.state));
+  const policyScoreMatchesLayout = Boolean(
+    policyScore
+    && (autoresearchMode || (policyScore.gui?.layout_signature === policyLayoutSignature
+    && policyScore.gui?.aoi === ACTIVE_AOI
+    && policyScore.gui?.scenario === scenario
+    && policyScore.gui?.budget_usd === policyScoringBudget))
+  );
 
   useEffect(() => {
     if (
@@ -1271,7 +1875,7 @@ function App() {
     fetch("/api/solweig/baseline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenario, date: "07-27", hour: simulationHour }),
+      body: JSON.stringify({ aoi: ACTIVE_AOI, scenario, date: "07-27", hour: simulationHour }),
     })
       .then(async (response) => {
         const body = await response.json();
@@ -1294,7 +1898,7 @@ function App() {
 
   // The comparison position is stored in raster coordinates, so its screen
   // position follows the same geographic location when the map pans or zooms.
-  const comparisonDividerX = camera.x + (199 + (comparisonSplit / 100) * 1001) * camera.zoom;
+  const comparisonDividerX = camera.x + (MAP_FRAME_LEFT + (comparisonSplit / 100) * MAP_DISPLAY_SIZE) * camera.zoom;
   const comparisonClip = comparisonSplit;
 
   const formatEstimate = (value: number) => `${value.toFixed(Math.abs(value) < 0.01 ? 3 : Math.abs(value) < 1 ? 2 : 1)}°C`;
@@ -1302,6 +1906,7 @@ function App() {
     ? "No mean change"
     : `${formatEstimate(Math.abs(reduction))} ${reduction > 0 ? "cooling" : "warming"}`;
   const formatCost = (value: number) => `$${Math.round(value).toLocaleString()}`;
+  const formatUnitCost = (value: number) => `$${value.toLocaleString(undefined, { minimumFractionDigits: Number.isInteger(value) ? 0 : 2, maximumFractionDigits: 2 })}`;
   const changedSinceSimulation = simulationResult ? (() => {
     const previous = new globalThis.Map(simulationResult.tree_snapshot.map((tree) => [tree.id, tree]));
     const current = new globalThis.Map(trees.map((tree) => [tree.id, tree]));
@@ -1327,6 +1932,7 @@ function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          aoi: ACTIVE_AOI,
           trees,
           reflective_pavement: {
             width: reflectiveMask.width,
@@ -1383,6 +1989,39 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (
+      !autoresearchMode
+      || !autoresearchLayoutReady
+      || !autoresearchCandidate
+      || !autoresearchRunId
+      || activeView !== "results"
+      || !hasInterventions
+      || !simulationReady
+      || activeSimulationRunning
+      || simulationMatchesLayout
+      || baselineLoadState !== "ready"
+    ) return;
+    const attemptKey = `${autoresearchRunId}:${autoresearchCandidate.id}:${ACTIVE_AOI}:${scenario}:${simulationHour}:${policyLayoutSignature}`;
+    if (autoresearchSimulationAttempt.current === attemptKey) return;
+    autoresearchSimulationAttempt.current = attemptKey;
+    void startFullSimulation();
+  }, [
+    activeSimulationRunning,
+    activeView,
+    autoresearchCandidate,
+    autoresearchLayoutReady,
+    autoresearchMode,
+    autoresearchRunId,
+    baselineLoadState,
+    hasInterventions,
+    policyLayoutSignature,
+    scenario,
+    simulationHour,
+    simulationMatchesLayout,
+    simulationReady,
+  ]);
+
   const cancelSimulation = async () => {
     if (!simulationJob || !["queued", "running"].includes(simulationJob.state)) return;
     try {
@@ -1393,8 +2032,54 @@ function App() {
     }
   };
 
+  const startPolicyScoring = async () => {
+    if (!hasInterventions || !policyScoringReady || policyScoreRunning || activeSimulationRunning || budgetExceeded) return;
+    setPolicyScoreError(null);
+    try {
+      const response = await fetch("/api/scoring/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          aoi: ACTIVE_AOI,
+          trees,
+          reflective_pavement: { width: reflectiveMask.width, height: reflectiveMask.height, count: reflectivePixelCount, data: reflectiveMaskEncoded },
+          cool_roof: { width: coolRoofMask.width, height: coolRoofMask.height, count: coolRoofPixelCount, data: coolRoofMaskEncoded },
+          green_roof: { width: greenRoofMask.width, height: greenRoofMask.height, count: greenRoofPixelCount, data: greenRoofMaskEncoded },
+          depaved_pavement: { width: depavedMask.width, height: depavedMask.height, count: depavedPixelCount, data: depavedMaskEncoded },
+          shade_canopy: { width: shadeCanopyMask.width, height: shadeCanopyMask.height, count: shadeCanopyPixelCount, data: shadeCanopyMaskEncoded },
+          solar_canopy: { width: solarCanopyMask.width, height: solarCanopyMask.height, count: solarCanopyPixelCount, data: solarCanopyMaskEncoded },
+          scenario,
+          budget_usd: policyScoringBudget,
+          layout_signature: policyLayoutSignature,
+        }),
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        if (response.status === 409 && body.id) {
+          setPolicyScoreJob({ id: body.id, state: "running", stage: "Reconnecting to policy score", progress: 0 });
+          return;
+        }
+        throw new Error(body.error ?? "Unable to start policy scoring");
+      }
+      setPolicyScoreJob({ id: body.id, state: "queued", stage: "Waiting to audit layout", progress: 0 });
+    } catch (error) {
+      setPolicyScoreError(error instanceof Error ? error.message : "Unable to start policy scoring");
+    }
+  };
+
+  const cancelPolicyScoring = async () => {
+    if (!policyScoreJob || !["queued", "running"].includes(policyScoreJob.state)) return;
+    try {
+      await fetch(`/api/scoring/run/${policyScoreJob.id}`, { method: "DELETE" });
+      setPolicyScoreJob((current) => current ? { ...current, state: "cancelled", stage: "Cancelled by user", progress: 100 } : current);
+    } catch {
+      setPolicyScoreError("Unable to cancel the local scoring process.");
+    }
+  };
+
   const positionComparisonBeforeInterventions = () => {
-    let firstIntervention = Math.min(...trees.map((tree) => (tree.x / 1001) * 100));
+    const mapWidth = manifest?.width ?? DEFAULT_GRID_SIZE;
+    let firstIntervention = Math.min(...trees.map((tree) => (tree.x / mapWidth) * 100));
     if (reflectivePixelCount) {
       for (let x = 0; x < reflectiveMask.width; x += 1) {
         let found = false;
@@ -1556,8 +2241,8 @@ function App() {
     const bounds = frame.getBoundingClientRect();
     if (clientX < bounds.left || clientX > bounds.right || clientY < bounds.top || clientY > bounds.bottom) return null;
     return {
-      x: Math.min(1001, Math.max(0, ((clientX - bounds.left) / bounds.width) * 1001)),
-      y: Math.min(1001, Math.max(0, ((clientY - bounds.top) / bounds.height) * 1001)),
+      x: Math.min(manifest?.width ?? DEFAULT_GRID_SIZE, Math.max(0, ((clientX - bounds.left) / bounds.width) * (manifest?.width ?? DEFAULT_GRID_SIZE))),
+      y: Math.min(manifest?.height ?? DEFAULT_GRID_SIZE, Math.max(0, ((clientY - bounds.top) / bounds.height) * (manifest?.height ?? DEFAULT_GRID_SIZE))),
     };
   };
 
@@ -1573,8 +2258,13 @@ function App() {
       setPlacementNotice("Tree crown diameter must remain between 2 and 20 m.");
       return;
     }
-    if (!isTreeLocationValid(candidate, candidate.crownDiameterM)) {
-      setPlacementNotice("That crown size would overlap a building, water, or the study boundary.");
+    if (!isTreeLocationValid(candidate, candidate.crownDiameterM, candidate.size, id)) {
+      setPlacementNotice("That tree would break a planting, obstruction, overlap, or boundary rule.");
+      return;
+    }
+    const costDelta = treeCost[candidate.size] - treeCost[tree.size];
+    if (costDelta > 0 && workspaceSpend() + costDelta > policyScoringBudget + 0.000001) {
+      setPlacementNotice(`Changing this tree would exceed the ${formatCost(policyScoringBudget)} policy budget.`);
       return;
     }
     setPlacementNotice(null);
@@ -1591,8 +2281,15 @@ function App() {
     crownDiameterM: crownDiameterForSize(newTreeSize),
   });
 
-  const isTreeLocationValid = (point: MapPoint, crownDiameterM: number) => {
+  const isTreeLocationValid = (point: MapPoint, crownDiameterM: number, size: TreeSize, excludeTreeId?: string) => {
     if (!placementMask || !manifest) return false;
+    const strictMask = treePlaceableMasks[size];
+    if (!strictMask || !placementMaskHasPoint(strictMask, point, manifest.width, manifest.height)) return false;
+    const col = Math.floor(point.x);
+    const row = Math.floor(point.y);
+    const pixel = row * manifest.width + col;
+    if (treesRef.current.some((tree) => tree.id !== excludeTreeId && Math.floor(tree.x) === col && Math.floor(tree.y) === row)) return false;
+    if (hasMaskPixel(shadeCanopyMaskRef.current, pixel) || hasMaskPixel(solarCanopyMaskRef.current, pixel)) return false;
     const resolution = Math.max(manifest.resolution_m, 0.01);
     const radius = crownDiameterM / (2 * resolution);
     const centerX = (point.x / manifest.width) * placementMask.width;
@@ -1624,8 +2321,12 @@ function App() {
       setPlacementNotice(placementUnavailableMessage());
       return;
     }
-    if (!isTreeLocationValid(point, tree.crownDiameterM)) {
-      setPlacementNotice("That crown would overlap a building, water, or the study boundary.");
+    if (!isTreeLocationValid(point, tree.crownDiameterM, tree.size)) {
+      setPlacementNotice("Trees must use a policy-valid pedestrian planting pixel, avoid obstructions and existing canopy, and not share a shade-layer pixel.");
+      return;
+    }
+    if (workspaceSpend() + treeCost[tree.size] > policyScoringBudget + 0.000001) {
+      setPlacementNotice(`The ${formatCost(policyScoringBudget)} policy budget has no room for another ${tree.size} tree.`);
       return;
     }
     setPlacementNotice(null);
@@ -1634,7 +2335,7 @@ function App() {
     setSelectedTreeId(tree.id);
   };
 
-  const brushSpacingPx = () => Math.sqrt(1000 / brushDensity) / Math.max(manifest?.resolution_m ?? 1, 0.01);
+  const brushSpacingPx = () => Math.sqrt(1000 / brushDensity) / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
 
   const paintBrushStamp = (point: MapPoint) => {
     if (!manifest || !placementMask || brushStrokeTrees.current.length >= 500) return;
@@ -1657,11 +2358,15 @@ function App() {
 
     const accepted: TreeIntervention[] = [];
     const occupied = treesRef.current;
+    let availableBudget = policyScoringBudget - workspaceSpend();
     for (const candidate of candidates) {
       if (brushStrokeTrees.current.length + accepted.length >= 500) break;
-      if (!isTreeLocationValid(candidate, crownDiameterM)) continue;
+      if (!isTreeLocationValid(candidate, crownDiameterM, newTreeSize)) continue;
       const tooClose = [...occupied, ...accepted].some((tree) => (tree.x - candidate.x) ** 2 + (tree.y - candidate.y) ** 2 < minDistanceSquared);
-      if (!tooClose) accepted.push(makeTree(candidate));
+      if (!tooClose && availableBudget + 0.000001 >= treeCost[newTreeSize]) {
+        accepted.push(makeTree(candidate));
+        availableBudget -= treeCost[newTreeSize];
+      }
     }
     if (!accepted.length) return;
     brushStrokeTrees.current.push(...accepted);
@@ -1695,7 +2400,7 @@ function App() {
     event.stopPropagation();
     const previous = brushLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const stampStep = Math.max(2, Math.min(brushSpacingPx() * 0.55, brushDiameterM * 0.3));
+    const stampStep = Math.max(1, Math.min(brushSpacingPx() * 0.55, brushDiameterM * 0.3 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01)));
     const steps = Math.max(1, Math.ceil(distance / stampStep));
     for (let step = 1; step <= steps; step += 1) {
       paintBrushStamp({
@@ -1736,7 +2441,7 @@ function App() {
     if (!draggingTreeId.current) return;
     const point = mapPoint(event.clientX, event.clientY);
     const tree = treesRef.current.find((candidate) => candidate.id === draggingTreeId.current);
-    if (point && tree && isTreeLocationValid(point, tree.crownDiameterM)) updateTree(draggingTreeId.current, point);
+    if (point && tree && isTreeLocationValid(point, tree.crownDiameterM, tree.size, tree.id)) updateTree(draggingTreeId.current, point);
   };
 
   const endTreeDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -1800,6 +2505,8 @@ function App() {
     const currentDepaved = depavedMaskRef.current;
     const depavedBits = currentDepaved.bits.slice();
     let depavedCount = currentDepaved.count;
+    let runningSpend = workspaceSpend();
+    const pixelArea = (manifest.resolution_m ?? DEFAULT_RESOLUTION_M) ** 2;
     const radius = reflectiveBrushDiameterM / (2 * Math.max(manifest.resolution_m, 0.01));
     for (const point of points) {
       const minX = Math.max(0, Math.floor(point.x - radius));
@@ -1814,9 +2521,13 @@ function App() {
           const wasSet = hasMaskPixel(current, pixel);
           const willSet = !erase;
           if (wasSet === willSet) continue;
+          const displacesDepaved = willSet && (depavedBits[pixel >> 3] & (1 << (pixel & 7))) !== 0;
+          const spendDelta = willSet ? pixelArea * (unitCost("light_road") - (displacesDepaved ? unitCost("grass_conversion") : 0)) : -pixelArea * unitCost("light_road");
+          if (runningSpend + spendDelta > policyScoringBudget + 0.000001) continue;
           writeMaskPixel(bits, pixel, willSet);
           count += willSet ? 1 : -1;
-          if (willSet && (depavedBits[pixel >> 3] & (1 << (pixel & 7))) !== 0) {
+          runningSpend += spendDelta;
+          if (displacesDepaved) {
             writeMaskPixel(depavedBits, pixel, false);
             depavedCount -= 1;
             reflectiveStrokeDisplacedDepaved.current.push(pixel);
@@ -1867,7 +2578,7 @@ function App() {
     event.stopPropagation();
     const previous = reflectiveStrokeLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const stepLength = Math.max(1, reflectiveBrushDiameterM * 0.28);
+    const stepLength = Math.max(1, reflectiveBrushDiameterM * 0.28 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01));
     const steps = Math.max(1, Math.ceil(distance / stepLength));
     const stamps = Array.from({ length: steps }, (_, index) => ({
       x: previous.x + ((point.x - previous.x) * (index + 1)) / steps,
@@ -1938,7 +2649,7 @@ function App() {
       reflectiveMaskRef.current = next;
       setReflectiveMask(next);
       setActionHistory((history) => [...history, { type: "reflective-erase", pixels, displacedDepavedPixels: [] }]);
-      setPlacementNotice(`Erased ${pixels.length.toLocaleString()} m² of reflective pavement.`);
+      setPlacementNotice(`Erased ${pixelAreaM2(pixels.length).toLocaleString()} m² of reflective pavement.`);
     } else {
       setPlacementNotice("The rectangle did not contain any proposed reflective pavement.");
     }
@@ -1959,7 +2670,8 @@ function App() {
         }
       }
     }
-    const selectionDistance = Math.max(10, reflectiveBrushDiameterM / 2 + 5);
+    const resolution = Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
+    const selectionDistance = Math.max(10, reflectiveBrushDiameterM / 2 + 5) / resolution;
     if (!selected || nearest > selectionDistance ** 2) {
       setPlacementNotice("Click closer to a mapped street segment.");
       return;
@@ -1970,7 +2682,7 @@ function App() {
         const start = path[index - 1];
         const end = path[index];
         const distance = Math.hypot(end[0] - start[0], end[1] - start[1]);
-        const steps = Math.max(1, Math.ceil(distance / Math.max(1, reflectiveBrushDiameterM * 0.25)));
+        const steps = Math.max(1, Math.ceil(distance / Math.max(1, reflectiveBrushDiameterM * 0.25 / resolution)));
         for (let step = 0; step <= steps; step += 1) stamps.push({
           x: start[0] + ((end[0] - start[0]) * step) / steps,
           y: start[1] + ((end[1] - start[1]) * step) / steps,
@@ -1988,7 +2700,7 @@ function App() {
     reflectiveStrokeDisplacedDepaved.current = [];
     if (pixels.length) {
       setActionHistory((current) => [...current, { type: "reflective-paint", pixels, displacedDepavedPixels }]);
-      setPlacementNotice(`${selected.name}: ${pixels.length.toLocaleString()} m² of pavement selected.`);
+      setPlacementNotice(`${selected.name}: ${pixelAreaM2(pixels.length).toLocaleString()} m² of pavement selected.`);
     } else {
       setPlacementNotice(`${selected.name} is already coated or has no pavement in the selected width.`);
     }
@@ -2015,7 +2727,8 @@ function App() {
 
   const oneSidedSegmentStamps = (segment: StreetSegment, side: 1 | -1, widthM: number) => {
     const stamps: MapPoint[] = [];
-    const offset = 5.25 + widthM / 2;
+    const resolution = Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
+    const offset = (5.25 + widthM / 2) / resolution;
     for (const path of segment.paths) for (let index = 1; index < path.length; index += 1) {
       const start = path[index - 1];
       const end = path[index];
@@ -2025,7 +2738,7 @@ function App() {
       if (!distance) continue;
       const normalX = (-dy / distance) * side;
       const normalY = (dx / distance) * side;
-      const steps = Math.max(1, Math.ceil(distance / Math.max(1, widthM * 0.25)));
+      const steps = Math.max(1, Math.ceil(distance / Math.max(1, widthM * 0.25 / resolution)));
       for (let step = 0; step <= steps; step += 1) stamps.push({
         x: start[0] + (dx * step) / steps + normalX * offset,
         y: start[1] + (dy * step) / steps + normalY * offset,
@@ -2036,10 +2749,12 @@ function App() {
 
   const oneSidedSegmentIcons = (segment: StreetSegment, side: 1 | -1, widthM: number) => {
     const icons: ShadeCanopyIcon[] = [];
-    const offset = 5.25 + widthM / 2;
+    const resolution = Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
+    const offset = (5.25 + widthM / 2) / resolution;
+    const iconSpacing = SHADE_CANOPY_ICON_SPACING_M / resolution;
     for (const path of segment.paths) {
       let traversed = 0;
-      let nextIconDistance = SHADE_CANOPY_ICON_SPACING_M / 2;
+      let nextIconDistance = iconSpacing / 2;
       for (let index = 1; index < path.length; index += 1) {
         const start = path[index - 1];
         const end = path[index];
@@ -2057,7 +2772,7 @@ function App() {
             y: start[1] + dy * fraction + normalY * offset,
             angle: 0,
           });
-          nextIconDistance += SHADE_CANOPY_ICON_SPACING_M;
+          nextIconDistance += iconSpacing;
         }
         traversed += distance;
       }
@@ -2073,6 +2788,15 @@ function App() {
     return depavableMask.pixels[(maskY * depavableMask.width + maskX) * 4] >= 128;
   };
 
+  const canopyPixelIsValid = (mask: PlacementMask | null, x: number, y: number, current: RasterMask) => {
+    if (!mask) return false;
+    return placementMaskHasPoint(mask, { x: x + 0.5, y: y + 0.5 }, current.width, current.height);
+  };
+
+  const treeOccupiesPixel = (pixel: number, width: number) => treesRef.current.some(
+    (tree) => Math.floor(tree.y) * width + Math.floor(tree.x) === pixel,
+  );
+
   const applyDepavePixels = (candidatePixels: number[], select: boolean) => {
     const current = depavedMaskRef.current;
     const reflective = reflectiveMaskRef.current;
@@ -2080,6 +2804,8 @@ function App() {
     const reflectiveBits = reflective.bits.slice();
     let count = current.count;
     let reflectiveCount = reflective.count;
+    let runningSpend = workspaceSpend();
+    const pixelArea = (manifest?.resolution_m ?? DEFAULT_RESOLUTION_M) ** 2;
     const changed: number[] = [];
     const displacedReflective: number[] = [];
     for (const pixel of candidatePixels) {
@@ -2088,10 +2814,14 @@ function App() {
       if (select && !depavablePixelIsValid(x, y)) continue;
       const wasSet = (bits[pixel >> 3] & (1 << (pixel & 7))) !== 0;
       if (wasSet === select) continue;
+      const displacesReflective = select && (reflectiveBits[pixel >> 3] & (1 << (pixel & 7))) !== 0;
+      const spendDelta = select ? pixelArea * (unitCost("grass_conversion") - (displacesReflective ? unitCost("light_road") : 0)) : -pixelArea * unitCost("grass_conversion");
+      if (runningSpend + spendDelta > policyScoringBudget + 0.000001) continue;
       writeMaskPixel(bits, pixel, select);
       count += select ? 1 : -1;
+      runningSpend += spendDelta;
       changed.push(pixel);
-      if (select && (reflectiveBits[pixel >> 3] & (1 << (pixel & 7))) !== 0) {
+      if (displacesReflective) {
         writeMaskPixel(reflectiveBits, pixel, false);
         reflectiveCount -= 1;
         displacedReflective.push(pixel);
@@ -2160,7 +2890,7 @@ function App() {
     event.stopPropagation();
     const previous = depaveStrokeLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const steps = Math.max(1, Math.ceil(distance / Math.max(1, depaveBrushDiameterM * 0.28)));
+    const steps = Math.max(1, Math.ceil(distance / Math.max(1, depaveBrushDiameterM * 0.28 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01))));
     applyDepaveStamps(Array.from({ length: steps }, (_, index) => ({
       x: previous.x + ((point.x - previous.x) * (index + 1)) / steps,
       y: previous.y + ((point.y - previous.y) * (index + 1)) / steps,
@@ -2188,7 +2918,7 @@ function App() {
     const point = mapPoint(event.clientX, event.clientY);
     if (!point || !depavableMask) return;
     const selection = nearestStreetSide(point);
-    const selectionDistance = Math.max(16, depaveBrushDiameterM + 7);
+    const selectionDistance = Math.max(16, depaveBrushDiameterM + 7) / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     if (!selection.segment || selection.distanceSquared > selectionDistance ** 2) {
       setPlacementNotice("Click on the sidewalk side of a mapped street segment.");
       return;
@@ -2204,7 +2934,7 @@ function App() {
     depaveStrokeDisplacedReflective.current = [];
     if (pixels.length) {
       setActionHistory((history) => [...history, { type: "depave-add", pixels, displacedReflectivePixels }]);
-      setPlacementNotice(`${selection.segment.name}: converted ${pixels.length.toLocaleString()} m² on the clicked side.`);
+      setPlacementNotice(`${selection.segment.name}: converted ${pixelAreaM2(pixels.length).toLocaleString()} m² on the clicked side.`);
     } else setPlacementNotice(`${selection.segment.name} has no unconverted eligible pavement on that side.`);
   };
 
@@ -2241,18 +2971,20 @@ function App() {
     const result = applyDepavePixels(candidates, false);
     if (result.changed.length) {
       setActionHistory((history) => [...history, { type: "depave-remove", pixels: result.changed, displacedReflectivePixels: result.displacedReflective }]);
-      setPlacementNotice(`Restored ${result.changed.length.toLocaleString()} m².`);
+      setPlacementNotice(`Restored ${pixelAreaM2(result.changed.length).toLocaleString()} m².`);
     } else setPlacementNotice("The rectangle did not contain proposed grass conversion.");
     setDepaveBox(null);
   };
 
   const applyShadeCanopyStamps = (points: MapPoint[], diameterM = shadeCanopyWidthM) => {
-    if (!manifest || !depavableMask || !points.length) return [] as number[];
+    if (!manifest || !shadeCanopyPlaceableMask || !points.length) return [] as number[];
     const current = shadeCanopyMaskRef.current;
     const bits = current.bits.slice();
     const radius = diameterM / (2 * Math.max(manifest.resolution_m, 0.01));
     const changed: number[] = [];
     const visited = new Set<number>();
+    let runningSpend = workspaceSpend();
+    const pixelCost = manifest.resolution_m ** 2 * unitCost("shade_canopy");
     for (const point of points) {
       const minX = Math.max(0, Math.floor(point.x - radius));
       const maxX = Math.min(current.width - 1, Math.ceil(point.x + radius));
@@ -2261,9 +2993,11 @@ function App() {
       for (let y = minY; y <= maxY; y += 1) for (let x = minX; x <= maxX; x += 1) {
         if ((x - point.x) ** 2 + (y - point.y) ** 2 > radius ** 2) continue;
         const pixel = y * current.width + x;
-        if (visited.has(pixel) || !depavablePixelIsValid(x, y) || hasMaskPixel(current, pixel) || hasMaskPixel(solarCanopyMaskRef.current, pixel)) continue;
+        if (visited.has(pixel) || !canopyPixelIsValid(shadeCanopyPlaceableMask, x, y, current) || treeOccupiesPixel(pixel, current.width) || hasMaskPixel(current, pixel) || hasMaskPixel(solarCanopyMaskRef.current, pixel)) continue;
+        if (runningSpend + pixelCost > policyScoringBudget + 0.000001) continue;
         visited.add(pixel);
         writeMaskPixel(bits, pixel, true);
+        runningSpend += pixelCost;
         changed.push(pixel);
       }
     }
@@ -2277,7 +3011,7 @@ function App() {
 
   const addShadeCanopyIcons = (candidates: ShadeCanopyIcon[]) => {
     const accepted: ShadeCanopyIcon[] = [];
-    const minimumSpacingSquared = (SHADE_CANOPY_ICON_SPACING_M * 0.6) ** 2;
+    const minimumSpacingSquared = (SHADE_CANOPY_ICON_SPACING_M * 0.6 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01)) ** 2;
     for (const icon of candidates) {
       if (!placementMask || !depavableMask || !manifest || !canopyIconIsNearEligibleGround(icon, placementMask, depavableMask, manifest.width, manifest.height, manifest.resolution_m)) continue;
       if ([...shadeCanopyIcons, ...shadeCanopyStrokeIcons.current, ...accepted].some((existing) => (existing.x - icon.x) ** 2 + (existing.y - icon.y) ** 2 < minimumSpacingSquared)) continue;
@@ -2292,7 +3026,7 @@ function App() {
     const point = mapPoint(event.clientX, event.clientY);
     if (!point) return;
     event.stopPropagation();
-    if (!depavableMask) {
+    if (!shadeCanopyPlaceableMask) {
       setPlacementNotice(depavableMaskStatus === "loading" ? "The canopy placement map is still loading." : "The canopy placement map is unavailable.");
       return;
     }
@@ -2316,7 +3050,8 @@ function App() {
     event.stopPropagation();
     const previous = shadeCanopyStrokeLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const steps = Math.max(1, Math.ceil(distance / Math.max(1, shadeCanopyBrushDiameterM * 0.28)));
+    const resolution = Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
+    const steps = Math.max(1, Math.ceil(distance / Math.max(1, shadeCanopyBrushDiameterM * 0.28 / resolution)));
     const stamps = Array.from({ length: steps }, (_, index) => ({
       x: previous.x + ((point.x - previous.x) * (index + 1)) / steps,
       y: previous.y + ((point.y - previous.y) * (index + 1)) / steps,
@@ -2324,11 +3059,12 @@ function App() {
     shadeCanopyStrokeChanges.current.push(...applyShadeCanopyStamps(stamps, shadeCanopyBrushDiameterM));
     const iconStart = shadeCanopyStrokeLastIconPoint.current ?? previous;
     const iconDistance = Math.hypot(point.x - iconStart.x, point.y - iconStart.y);
-    if (iconDistance >= SHADE_CANOPY_ICON_SPACING_M) {
-      const iconSteps = Math.floor(iconDistance / SHADE_CANOPY_ICON_SPACING_M);
+    const iconSpacing = SHADE_CANOPY_ICON_SPACING_M / resolution;
+    if (iconDistance >= iconSpacing) {
+      const iconSteps = Math.floor(iconDistance / iconSpacing);
       const angle = Math.atan2(point.y - iconStart.y, point.x - iconStart.x);
       const candidates = Array.from({ length: iconSteps }, (_, index) => {
-        const distanceAlong = (index + 1) * SHADE_CANOPY_ICON_SPACING_M;
+        const distanceAlong = (index + 1) * iconSpacing;
         return {
           id: crypto.randomUUID(),
           x: iconStart.x + Math.cos(angle) * distanceAlong,
@@ -2368,9 +3104,9 @@ function App() {
   const selectShadeCanopySegment = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!shadeCanopySegmentMode) return;
     const point = mapPoint(event.clientX, event.clientY);
-    if (!point || !depavableMask) return;
+    if (!point || !shadeCanopyPlaceableMask) return;
     const selection = nearestStreetSide(point);
-    const selectionDistance = Math.max(16, shadeCanopyWidthM + 7);
+    const selectionDistance = Math.max(16, shadeCanopyWidthM + 7) / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     if (!selection.segment || selection.distanceSquared > selectionDistance ** 2) {
       setPlacementNotice("Click on the sidewalk side of a mapped street segment.");
       return;
@@ -2379,7 +3115,7 @@ function App() {
     if (pixels.length) {
       const icons = addShadeCanopyIcons(oneSidedSegmentIcons(selection.segment, selection.side, shadeCanopyWidthM));
       setActionHistory((history) => [...history, { type: "shade-canopy-add", pixels, icons }]);
-      setPlacementNotice(`${selection.segment.name}: added ${pixels.length.toLocaleString()} m² of shade canopy on the clicked side.`);
+      setPlacementNotice(`${selection.segment.name}: added ${pixelAreaM2(pixels.length).toLocaleString()} m² of shade canopy on the clicked side.`);
     } else setPlacementNotice(`${selection.segment.name} has no available sidewalk coverage on that side; fabric and PV canopies cannot overlap.`);
   };
 
@@ -2427,18 +3163,20 @@ function App() {
         setShadeCanopyIcons((currentIcons) => currentIcons.filter((icon) => !removedIds.has(icon.id)));
       }
       setActionHistory((history) => [...history, { type: "shade-canopy-remove", pixels, icons }]);
-      setPlacementNotice(`Removed ${pixels.length.toLocaleString()} m² of shade canopy.`);
+      setPlacementNotice(`Removed ${pixelAreaM2(pixels.length).toLocaleString()} m² of shade canopy.`);
     } else setPlacementNotice("The rectangle did not contain proposed shade canopy.");
     setShadeCanopyEraseBox(null);
   };
 
   const applySolarCanopyStamps = (points: MapPoint[], diameterM = solarCanopyWidthM) => {
-    if (!manifest || !depavableMask || !points.length) return [] as number[];
+    if (!manifest || !solarCanopyPlaceableMask || !points.length) return [] as number[];
     const current = solarCanopyMaskRef.current;
     const bits = current.bits.slice();
     const radius = diameterM / (2 * Math.max(manifest.resolution_m, 0.01));
     const changed: number[] = [];
     const visited = new Set<number>();
+    let runningSpend = workspaceSpend();
+    const pixelCost = manifest.resolution_m ** 2 * unitCost("solar_canopy");
     for (const point of points) {
       const minX = Math.max(0, Math.floor(point.x - radius));
       const maxX = Math.min(current.width - 1, Math.ceil(point.x + radius));
@@ -2447,9 +3185,11 @@ function App() {
       for (let y = minY; y <= maxY; y += 1) for (let x = minX; x <= maxX; x += 1) {
         if ((x - point.x) ** 2 + (y - point.y) ** 2 > radius ** 2) continue;
         const pixel = y * current.width + x;
-        if (visited.has(pixel) || !depavablePixelIsValid(x, y) || hasMaskPixel(current, pixel) || hasMaskPixel(shadeCanopyMaskRef.current, pixel)) continue;
+        if (visited.has(pixel) || !canopyPixelIsValid(solarCanopyPlaceableMask, x, y, current) || treeOccupiesPixel(pixel, current.width) || hasMaskPixel(current, pixel) || hasMaskPixel(shadeCanopyMaskRef.current, pixel)) continue;
+        if (runningSpend + pixelCost > policyScoringBudget + 0.000001) continue;
         visited.add(pixel);
         writeMaskPixel(bits, pixel, true);
+        runningSpend += pixelCost;
         changed.push(pixel);
       }
     }
@@ -2463,7 +3203,7 @@ function App() {
 
   const addSolarCanopyIcons = (candidates: ShadeCanopyIcon[]) => {
     const accepted: ShadeCanopyIcon[] = [];
-    const minimumSpacingSquared = (SHADE_CANOPY_ICON_SPACING_M * 0.6) ** 2;
+    const minimumSpacingSquared = (SHADE_CANOPY_ICON_SPACING_M * 0.6 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01)) ** 2;
     for (const icon of candidates) {
       if (!placementMask || !depavableMask || !manifest || !canopyIconIsNearEligibleGround(icon, placementMask, depavableMask, manifest.width, manifest.height, manifest.resolution_m)) continue;
       if ([...solarCanopyIcons, ...solarCanopyStrokeIcons.current, ...accepted].some((existing) => (existing.x - icon.x) ** 2 + (existing.y - icon.y) ** 2 < minimumSpacingSquared)) continue;
@@ -2478,7 +3218,7 @@ function App() {
     const point = mapPoint(event.clientX, event.clientY);
     if (!point) return;
     event.stopPropagation();
-    if (!depavableMask) {
+    if (!solarCanopyPlaceableMask) {
       setPlacementNotice(depavableMaskStatus === "loading" ? "The solar-canopy placement map is still loading." : "The solar-canopy placement map is unavailable.");
       return;
     }
@@ -2501,7 +3241,8 @@ function App() {
     event.stopPropagation();
     const previous = solarCanopyStrokeLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const steps = Math.max(1, Math.ceil(distance / Math.max(1, solarCanopyBrushDiameterM * 0.28)));
+    const resolution = Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
+    const steps = Math.max(1, Math.ceil(distance / Math.max(1, solarCanopyBrushDiameterM * 0.28 / resolution)));
     const stamps = Array.from({ length: steps }, (_, index) => ({
       x: previous.x + ((point.x - previous.x) * (index + 1)) / steps,
       y: previous.y + ((point.y - previous.y) * (index + 1)) / steps,
@@ -2509,11 +3250,12 @@ function App() {
     solarCanopyStrokeChanges.current.push(...applySolarCanopyStamps(stamps, solarCanopyBrushDiameterM));
     const iconStart = solarCanopyStrokeLastIconPoint.current ?? previous;
     const iconDistance = Math.hypot(point.x - iconStart.x, point.y - iconStart.y);
-    if (iconDistance >= SHADE_CANOPY_ICON_SPACING_M) {
-      const iconSteps = Math.floor(iconDistance / SHADE_CANOPY_ICON_SPACING_M);
+    const iconSpacing = SHADE_CANOPY_ICON_SPACING_M / resolution;
+    if (iconDistance >= iconSpacing) {
+      const iconSteps = Math.floor(iconDistance / iconSpacing);
       const angle = Math.atan2(point.y - iconStart.y, point.x - iconStart.x);
       const candidates = Array.from({ length: iconSteps }, (_, index) => {
-        const distanceAlong = (index + 1) * SHADE_CANOPY_ICON_SPACING_M;
+        const distanceAlong = (index + 1) * iconSpacing;
         return { id: crypto.randomUUID(), x: iconStart.x + Math.cos(angle) * distanceAlong, y: iconStart.y + Math.sin(angle) * distanceAlong, angle: 0 };
       });
       solarCanopyStrokeIcons.current.push(...addSolarCanopyIcons(candidates));
@@ -2547,9 +3289,9 @@ function App() {
   const selectSolarCanopySegment = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (!solarCanopySegmentMode) return;
     const point = mapPoint(event.clientX, event.clientY);
-    if (!point || !depavableMask) return;
+    if (!point || !solarCanopyPlaceableMask) return;
     const selection = nearestStreetSide(point);
-    const selectionDistance = Math.max(16, solarCanopyWidthM + 7);
+    const selectionDistance = Math.max(16, solarCanopyWidthM + 7) / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01);
     if (!selection.segment || selection.distanceSquared > selectionDistance ** 2) {
       setPlacementNotice("Click on the sidewalk side of a mapped street segment.");
       return;
@@ -2558,7 +3300,7 @@ function App() {
     if (pixels.length) {
       const icons = addSolarCanopyIcons(oneSidedSegmentIcons(selection.segment, selection.side, solarCanopyWidthM));
       setActionHistory((history) => [...history, { type: "solar-canopy-add", pixels, icons }]);
-      setPlacementNotice(`${selection.segment.name}: added ${pixels.length.toLocaleString()} m² of solar canopy on the clicked side.`);
+      setPlacementNotice(`${selection.segment.name}: added ${pixelAreaM2(pixels.length).toLocaleString()} m² of solar canopy on the clicked side.`);
     } else setPlacementNotice(`${selection.segment.name} has no available sidewalk coverage on that side; PV and fabric canopies cannot overlap.`);
   };
 
@@ -2606,7 +3348,7 @@ function App() {
         setSolarCanopyIcons((currentIcons) => currentIcons.filter((icon) => !removedIds.has(icon.id)));
       }
       setActionHistory((history) => [...history, { type: "solar-canopy-remove", pixels, icons }]);
-      setPlacementNotice(`Removed ${pixels.length.toLocaleString()} m² of solar canopy.`);
+      setPlacementNotice(`Removed ${pixelAreaM2(pixels.length).toLocaleString()} m² of solar canopy.`);
     } else setPlacementNotice("The rectangle did not contain proposed solar canopy.");
     setSolarCanopyEraseBox(null);
   };
@@ -2630,8 +3372,20 @@ function App() {
     const otherBits = other.bits.slice();
     const changed: number[] = [];
     const displaced: number[] = [];
+    let runningSpend = workspaceSpend();
+    const pixelArea = (manifest?.resolution_m ?? DEFAULT_RESOLUTION_M) ** 2;
+    const targetUnitCost = unitCost(kind);
+    const otherUnitCost = unitCost(kind === "green_roof" ? "cool_roof" : "green_roof");
     for (const regionId of regionIds) {
-      for (const pixel of roofPixelsByRegionRef.current.get(regionId) ?? []) {
+      const regionPixels = roofPixelsByRegionRef.current.get(regionId) ?? [];
+      let regionSpendDelta = 0;
+      for (const pixel of regionPixels) {
+        const wasSet = (bits[pixel >> 3] & (1 << (pixel & 7))) !== 0;
+        if (wasSet !== select) regionSpendDelta += (select ? 1 : -1) * pixelArea * targetUnitCost;
+        if (select && (otherBits[pixel >> 3] & (1 << (pixel & 7))) !== 0) regionSpendDelta -= pixelArea * otherUnitCost;
+      }
+      if (select && runningSpend + regionSpendDelta > policyScoringBudget + 0.000001) continue;
+      for (const pixel of regionPixels) {
         const wasSet = hasMaskPixel(current, pixel);
         if (wasSet !== select) {
           writeMaskPixel(bits, pixel, select);
@@ -2642,6 +3396,7 @@ function App() {
           displaced.push(pixel);
         }
       }
+      runningSpend += regionSpendDelta;
     }
     if (changed.length) {
       const next = { ...current, bits, count: current.count + (select ? changed.length : -changed.length) };
@@ -2678,7 +3433,7 @@ function App() {
     const remove = hasMaskPixel(targetMask, pixel);
     const { changed, displaced } = applyRoofRegions(new Set([regionId]), !remove, activeRoofKind);
     setPlacementNotice(changed.length || displaced.length
-      ? `${remove ? "Removed" : "Applied"} ${activeRoofLabel} on one building · ${changed.length.toLocaleString()} m²${displaced.length ? ` · replaced ${displaced.length.toLocaleString()} m² of the other roof treatment` : ""}.`
+      ? `${remove ? "Removed" : "Applied"} ${activeRoofLabel} on one building · ${pixelAreaM2(changed.length).toLocaleString()} m²${displaced.length ? ` · replaced ${pixelAreaM2(displaced.length).toLocaleString()} m² of the other roof treatment` : ""}.`
       : "That whole roof is already in the requested state.");
   };
 
@@ -2736,7 +3491,7 @@ function App() {
     event.stopPropagation();
     const previous = coolRoofStrokeLastPoint.current;
     const distance = Math.hypot(point.x - previous.x, point.y - previous.y);
-    const stepLength = Math.max(2, coolRoofBrushDiameterM * 0.3);
+    const stepLength = Math.max(1, coolRoofBrushDiameterM * 0.3 / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01));
     const steps = Math.max(1, Math.ceil(distance / stepLength));
     for (let step = 1; step <= steps; step += 1) applyCoolRoofBrushPoint({
       x: previous.x + ((point.x - previous.x) * step) / steps,
@@ -2758,7 +3513,7 @@ function App() {
     coolRoofStrokeRegionIds.current = new Set();
     if (pixels.length || displacedPixels.length) {
       setActionHistory((history) => [...history, { type: "roof-add", kind: activeRoofKind, pixels, displacedPixels }]);
-      setPlacementNotice(`Applied whole ${activeRoofLabel}s · ${pixels.length.toLocaleString()} m² added${displacedPixels.length ? ` · replaced ${displacedPixels.length.toLocaleString()} m² of the other treatment` : ""}.`);
+      setPlacementNotice(`Applied whole ${activeRoofLabel}s · ${pixelAreaM2(pixels.length).toLocaleString()} m² added${displacedPixels.length ? ` · replaced ${pixelAreaM2(displacedPixels.length).toLocaleString()} m² of the other treatment` : ""}.`);
     } else {
       setPlacementNotice("The brush did not touch an unselected building roof.");
     }
@@ -2800,7 +3555,7 @@ function App() {
     }
     const { changed, displaced } = applyRoofRegions(regionIds, !coolRoofEraseMode, activeRoofKind);
     setPlacementNotice(changed.length || displaced.length
-      ? `${coolRoofEraseMode ? "Removed" : "Applied"} ${activeRoofLabel}s ${coolRoofEraseMode ? "from" : "to"} ${regionIds.size} building${regionIds.size === 1 ? "" : "s"} · ${changed.length.toLocaleString()} m² ${coolRoofEraseMode ? "removed" : "added"}${displaced.length ? ` · replaced ${displaced.length.toLocaleString()} m² of the other treatment` : ""}.`
+      ? `${coolRoofEraseMode ? "Removed" : "Applied"} ${activeRoofLabel}s ${coolRoofEraseMode ? "from" : "to"} ${regionIds.size} building${regionIds.size === 1 ? "" : "s"} · ${pixelAreaM2(changed.length).toLocaleString()} m² ${coolRoofEraseMode ? "removed" : "added"}${displaced.length ? ` · replaced ${pixelAreaM2(displaced.length).toLocaleString()} m² of the other treatment` : ""}.`
       : coolRoofEraseMode ? `The rectangle did not contain any selected ${activeRoofLabel}s.` : "Drag across one or more unselected building roofs.");
     setCoolRoofBox(null);
   };
@@ -2951,10 +3706,17 @@ function App() {
         // Local state is still safe to reset if the process has already stopped.
       }
     }
+    if (policyScoreJob && ["queued", "running"].includes(policyScoreJob.state)) {
+      try {
+        await fetch(`/api/scoring/run/${policyScoreJob.id}`, { method: "DELETE" });
+      } catch {
+        // The score process may already have stopped; browser state can still reset.
+      }
+    }
     localStorage.removeItem(TREE_STORAGE_KEY);
     localStorage.removeItem(SIMULATION_STORAGE_KEY);
-    localStorage.removeItem("shade.chinatown.solweig-result.v1");
     localStorage.removeItem(BASELINE_STORAGE_KEY);
+    localStorage.removeItem(POLICY_SCORE_STORAGE_KEY);
     localStorage.removeItem(REFLECTIVE_STORAGE_KEY);
     localStorage.removeItem(COOL_ROOF_STORAGE_KEY);
     localStorage.removeItem(GREEN_ROOF_STORAGE_KEY);
@@ -2965,6 +3727,12 @@ function App() {
     localStorage.removeItem(SOLAR_CANOPY_STORAGE_KEY);
     localStorage.removeItem(SOLAR_CANOPY_ICONS_STORAGE_KEY);
     window.location.reload();
+  };
+
+  const selectStudyArea = (area: OverviewArea) => {
+    localStorage.setItem(STUDY_AREA_STORAGE_KEY, area.id);
+    if (area.id === ACTIVE_AOI) setOverviewOpen(false);
+    else window.location.reload();
   };
 
   const zoomAt = (nextZoom: number, anchorX: number, anchorY: number) => {
@@ -3286,7 +4054,8 @@ function App() {
     setCoolRoofCursor(null);
   };
 
-  const mapNoteTitle = coolRoofEraseMode ? `Erase ${activeRoofLabel}s by area`
+  const mapNoteTitle = autoresearchMode ? autoresearchLayoutReady ? `Archived iteration · ${autoresearchCandidate?.policy_name ?? "policy"}` : "Loading archived policy"
+    : coolRoofEraseMode ? `Erase ${activeRoofLabel}s by area`
     : coolRoofBoxMode ? "Select buildings by area"
     : coolRoofBrushMode ? `Brush whole ${activeRoofLabel}s`
     : coolRoofClickMode ? "Select a whole roof"
@@ -3307,7 +4076,8 @@ function App() {
             : placementMode ? "Place a tree"
               : activeView === "results" ? resultsUnavailable ? "SOLWEIG unavailable" : resultsAwaitingSolweig ? "Preparing SOLWEIG result" : simulatedMetric ? simulationMatchesLayout ? "SOLWEIG result" : "SOLWEIG-calibrated result" : baselineMetric ? hasInterventions ? "SOLWEIG baseline + fast estimate" : "SOLWEIG existing conditions" : "Screening estimate"
                 : comparisonActive ? "Layer comparison" : manifest ? "Local layers ready" : "Loading local layers";
-  const mapNoteDetail = coolRoofEraseMode ? "Drag a rectangle; every selected roof it touches is removed"
+  const mapNoteDetail = autoresearchMode ? activeView === "design" ? "Read-only policy preview · use Copy to editable Design to make changes" : activeView === "results" ? "Archived layout is simulated automatically when a cached physical result is unavailable" : "Move through feasible iterations with the autoresearch controls"
+    : coolRoofEraseMode ? "Drag a rectangle; every selected roof it touches is removed"
     : coolRoofBoxMode ? `Drag a rectangle across every building to receive a ${activeRoofLabel}`
     : coolRoofBrushMode ? "Drag the brush; touching any part applies the whole roof"
     : coolRoofClickMode ? "Click a building to toggle its entire roof"
@@ -3324,12 +4094,16 @@ function App() {
     : reflectiveSegmentMode ? "Click a mapped street; coating clips to pavement"
       : reflectiveBrushMode ? "Drag over roads, sidewalks, plazas, or parking pavement"
         : removalMode ? "Drag a rectangle around trees to delete them"
-          : brushMode ? "Drag to paint individual trees · buildings and water excluded"
-            : placementMode ? "Click a valid location · buildings and water excluded"
+          : brushMode ? "Drag to paint policy-valid street trees · siting and budget enforced"
+            : placementMode ? "Click a policy-valid planting location · siting and budget enforced"
               : resultsUnavailable ? "No fallback result map is displayed"
                 : resultsAwaitingSolweig ? "The map will appear when the simulation completes"
                   : activeView === "results" && !hasInterventions ? "Existing conditions · scroll or use +/− to zoom"
                     : activeView === "results" || comparisonActive ? "Grab the comparison divider · scroll or use +/− to zoom" : "Drag to move · scroll or use +/− to zoom";
+
+  const studyAreaLabel = manifest?.label ?? ACTIVE_AOI.split("_").map((part) => part[0]?.toUpperCase() + part.slice(1)).join(" ");
+  const gridPercent = (value: number, axis: "x" | "y" = "x") => (value / Math.max(axis === "x" ? manifest?.width ?? DEFAULT_GRID_SIZE : manifest?.height ?? DEFAULT_GRID_SIZE, 1)) * 100;
+  const displayPixelsForMeters = (meters: number) => (meters / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01)) * (MAP_DISPLAY_SIZE / Math.max(manifest?.width ?? DEFAULT_GRID_SIZE, 1));
 
   return (
     <div className="app-shell">
@@ -3343,19 +4117,31 @@ function App() {
           </div>
         </div>
 
-        <div className="project-title">
+        <button className="project-title" onClick={() => setOverviewOpen(true)}>
           <span className="status-dot" />
-          <span>Chinatown study</span>
-          <button className="bare-button" aria-label="Choose study"><ChevronDown size={16} /></button>
-        </div>
+          <span>{studyAreaLabel} study</span>
+          <span className="bare-button" aria-hidden="true"><ChevronDown size={16} /></span>
+        </button>
 
         <div className="top-actions">
+          <button className={`button autoresearch-toggle ${autoresearchMode ? "active" : ""}`} onClick={autoresearchMode ? disableAutoresearch : enableAutoresearch}>
+            <GitBranch size={16} /> {autoresearchMode ? "Autoresearch on" : "Autoresearch"}
+          </button>
           <div className="offline-pill"><span /> Offline workspace</div>
-          <button className="button secondary" onClick={saveLayout}><Save size={16} /> {savedNotice ? "Saved" : "Save"}</button>
-          <button className="button secondary reset-button" onClick={() => setResetConfirmOpen(true)}><RotateCcw size={16} /> Reset</button>
+          <button className="button secondary" disabled={autoresearchMode} title={autoresearchMode ? "Copy the archived policy to Design before saving it" : undefined} onClick={saveLayout}><Save size={16} /> {savedNotice ? "Saved" : "Save"}</button>
+          <button className="button secondary reset-button" disabled={autoresearchMode} onClick={() => setResetConfirmOpen(true)}><RotateCcw size={16} /> Reset</button>
           <button className="icon-button" aria-label="Help"><CircleHelp size={19} /></button>
         </div>
       </header>
+
+      {autoresearchMode && <AutoresearchNavigator
+        activeAoi={ACTIVE_AOI}
+        onClose={disableAutoresearch}
+        onLayout={applyAutoresearchLayout}
+        onUnavailable={clearAutoresearchLayout}
+        onCopy={copyAutoresearchToDesign}
+        onSelectAoi={selectAutoresearchAoi}
+      />}
 
       <aside className="rail" aria-label="Primary navigation">
         <button className={`rail-item ${activeView === "map" ? "active" : ""}`} onClick={openMap}><Map size={20} /><span>Map</span></button>
@@ -3367,7 +4153,7 @@ function App() {
         <section
           ref={mapStageRef}
           className={`map-stage ${isPanning ? "is-panning" : ""} ${placementMode ? "is-placing" : ""} ${brushMode ? "is-brushing" : ""} ${removalMode ? "is-removing" : ""} ${reflectiveBrushMode || reflectiveSegmentMode || reflectiveEraseMode ? "is-coating" : ""} ${depaveBrushMode || depaveBoxMode || depaveEraseMode ? "is-depaving" : ""} ${shadeCanopySegmentMode || shadeCanopyBrushMode || shadeCanopyEraseMode || solarCanopySegmentMode || solarCanopyBrushMode || solarCanopyEraseMode ? "is-canopying" : ""} ${coolRoofClickMode || coolRoofBrushMode || coolRoofBoxMode || coolRoofEraseMode ? "is-roofing" : ""}`}
-          aria-label="Chinatown map preview"
+          aria-label={`${studyAreaLabel} map preview`}
           onPointerDown={startPan}
           onPointerMove={movePan}
           onPointerUp={endPan}
@@ -3380,7 +4166,7 @@ function App() {
           >
             <div className="map-grid" />
             <div
-              className="raster-frame"
+              className={`raster-frame ${autoresearchMode ? "autoresearch-readonly" : ""}`}
               ref={rasterFrameRef}
               onClick={(event) => { placeTree(event); selectStreetSegment(event); selectDepaveSegment(event); selectShadeCanopySegment(event); selectSolarCanopySegment(event); selectCoolRoof(event); }}
               onPointerDown={(event) => { startRemovalBox(event); startBrushStroke(event); startReflectiveStroke(event); startReflectiveEraseBox(event); startDepaveStroke(event); startDepaveBox(event); startShadeCanopyStroke(event); startShadeCanopyEraseBox(event); startSolarCanopyStroke(event); startSolarCanopyEraseBox(event); startCoolRoofBrush(event); startCoolRoofBox(event); }}
@@ -3389,7 +4175,7 @@ function App() {
               onPointerCancel={(event) => { setRemovalBox(null); setReflectiveEraseBox(null); setDepaveBox(null); setShadeCanopyEraseBox(null); setSolarCanopyEraseBox(null); setCoolRoofBox(null); finishBrushStroke(event); finishReflectiveStroke(event); finishDepaveStroke(event); finishShadeCanopyStroke(event); finishSolarCanopyStroke(event); finishCoolRoofBrush(event); }}
               onPointerLeave={() => { if (!brushStrokeActive.current) setBrushCursor(null); if (!reflectiveStrokeActive.current) setReflectiveCursor(null); if (!depaveStrokeActive.current) setDepaveCursor(null); if (!shadeCanopyStrokeActive.current) setShadeCanopyCursor(null); if (!solarCanopyStrokeActive.current) setSolarCanopyCursor(null); if (!coolRoofStrokeActive.current) setCoolRoofCursor(null); }}
             >
-              {visible.base && <img className="raster-layer" src="/data/chinatown/base.png" alt="Chinatown local cartographic base" draggable="false" />}
+              {visible.base && <img className="raster-layer" src={`${dataRoot}/base.png`} alt={`${studyAreaLabel} local cartographic base`} draggable="false" />}
               {manifest ? (
                 <InterventionMapLayers
                   showLand={Boolean(visible.land)}
@@ -3397,12 +4183,14 @@ function App() {
                   trees={trees}
                   width={manifest.width}
                   height={manifest.height}
+                  dataRoot={dataRoot}
+                  resolutionM={manifest.resolution_m}
                   comparisonActive={comparisonActive && (!resultVisible || resultDataReady)}
                   afterClipPercent={comparisonClip}
                 />
               ) : <>
-                {visible.land && <img className="raster-layer" src="/data/chinatown/landcover.png" alt="Chinatown land-cover classes" draggable="false" />}
-                {visible.canopy && <img className="raster-layer" src="/data/chinatown/canopy.png" alt="Chinatown tree-canopy height" draggable="false" />}
+                {visible.land && <img className="raster-layer" src={`${dataRoot}/landcover.png`} alt={`${studyAreaLabel} land-cover classes`} draggable="false" />}
+                {visible.canopy && <img className="raster-layer" src={`${dataRoot}/canopy.png`} alt={`${studyAreaLabel} tree-canopy height`} draggable="false" />}
               </>}
               {depavedPixelCount > 0 && activeView !== "results" && (
                 <DepavedLayer
@@ -3455,7 +4243,7 @@ function App() {
                   textured={activeView === "design"}
                 />
               )}
-              {visible.heat && <img className="raster-layer heat-layer" src="/data/chinatown/heat_ta3pm.png" alt="Chinatown 3 PM air-temperature model" draggable="false" />}
+              {visible.heat && <img className="raster-layer heat-layer" src={`${dataRoot}/heat_ta3pm.png`} alt={`${studyAreaLabel} 3 PM air-temperature model`} draggable="false" />}
               {resultRasterVisible && manifest?.screening_metrics && metricDisplayMin !== undefined && metricDisplayMax !== undefined && (
                 <ScreeningMetricLayer
                   metric={metric}
@@ -3463,6 +4251,8 @@ function App() {
                   reflectiveMask={reflectiveMask}
                   width={manifest.width}
                   height={manifest.height}
+                  metricsUrl={`${dataRoot}/${manifest.screening_metrics.file}`}
+                  resolutionM={manifest.resolution_m}
                   displayMin={metricDisplayMin}
                   displayMax={metricDisplayMax}
                   afterClipPercent={comparisonClip}
@@ -3476,7 +4266,7 @@ function App() {
                   <button
                     key={tree.id}
                     className={`tree-marker ${selectedTreeId === tree.id ? "selected" : ""}`}
-                    style={{ left: `${tree.x / 10.01}%`, top: `${tree.y / 10.01}%`, "--tree-marker-size": `${tree.size === "small" ? 14 : 17}px` } as CSSProperties}
+                    style={{ left: `${gridPercent(tree.x)}%`, top: `${gridPercent(tree.y, "y")}%`, "--tree-marker-size": `${tree.size === "small" ? 14 : 17}px` } as CSSProperties}
                     aria-label={`Tree ${index + 1}, ${tree.size}`}
                     title={`${tree.size === "small" ? "Small" : "Medium"} tree · ${tree.crownDiameterM} m crown`}
                     onClick={(event) => {
@@ -3497,10 +4287,10 @@ function App() {
                 <div
                   className="brush-cursor"
                   style={{
-                    left: `${brushCursor.x / 10.01}%`,
-                    top: `${brushCursor.y / 10.01}%`,
-                    width: `${brushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                    height: `${brushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                    left: `${gridPercent(brushCursor.x)}%`,
+                    top: `${gridPercent(brushCursor.y, "y")}%`,
+                    width: `${displayPixelsForMeters(brushDiameterM)}px`,
+                    height: `${displayPixelsForMeters(brushDiameterM)}px`,
                   }}
                 />
               )}
@@ -3508,45 +4298,45 @@ function App() {
                 <div
                   className="reflective-brush-cursor"
                   style={{
-                    left: `${reflectiveCursor.x / 10.01}%`,
-                    top: `${reflectiveCursor.y / 10.01}%`,
-                    width: `${reflectiveBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                    height: `${reflectiveBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                    left: `${gridPercent(reflectiveCursor.x)}%`,
+                    top: `${gridPercent(reflectiveCursor.y, "y")}%`,
+                    width: `${displayPixelsForMeters(reflectiveBrushDiameterM)}px`,
+                    height: `${displayPixelsForMeters(reflectiveBrushDiameterM)}px`,
                   }}
                 />
               )}
               {depaveBrushMode && depaveCursor && (
                 <div className="depave-brush-cursor" style={{
-                  left: `${depaveCursor.x / 10.01}%`,
-                  top: `${depaveCursor.y / 10.01}%`,
-                  width: `${depaveBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                  height: `${depaveBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                  left: `${gridPercent(depaveCursor.x)}%`,
+                  top: `${gridPercent(depaveCursor.y, "y")}%`,
+                  width: `${displayPixelsForMeters(depaveBrushDiameterM)}px`,
+                  height: `${displayPixelsForMeters(depaveBrushDiameterM)}px`,
                 }} />
               )}
               {shadeCanopyBrushMode && shadeCanopyCursor && (
                 <div className="shade-canopy-brush-cursor" style={{
-                  left: `${shadeCanopyCursor.x / 10.01}%`,
-                  top: `${shadeCanopyCursor.y / 10.01}%`,
-                  width: `${shadeCanopyBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                  height: `${shadeCanopyBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                  left: `${gridPercent(shadeCanopyCursor.x)}%`,
+                  top: `${gridPercent(shadeCanopyCursor.y, "y")}%`,
+                  width: `${displayPixelsForMeters(shadeCanopyBrushDiameterM)}px`,
+                  height: `${displayPixelsForMeters(shadeCanopyBrushDiameterM)}px`,
                 }} />
               )}
               {solarCanopyBrushMode && solarCanopyCursor && (
                 <div className="solar-canopy-brush-cursor" style={{
-                  left: `${solarCanopyCursor.x / 10.01}%`,
-                  top: `${solarCanopyCursor.y / 10.01}%`,
-                  width: `${solarCanopyBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                  height: `${solarCanopyBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                  left: `${gridPercent(solarCanopyCursor.x)}%`,
+                  top: `${gridPercent(solarCanopyCursor.y, "y")}%`,
+                  width: `${displayPixelsForMeters(solarCanopyBrushDiameterM)}px`,
+                  height: `${displayPixelsForMeters(solarCanopyBrushDiameterM)}px`,
                 }} />
               )}
               {coolRoofBrushMode && coolRoofCursor && (
                 <div
                   className={`cool-roof-brush-cursor ${activeRoofKind === "green_roof" ? "green" : ""}`}
                   style={{
-                    left: `${coolRoofCursor.x / 10.01}%`,
-                    top: `${coolRoofCursor.y / 10.01}%`,
-                    width: `${coolRoofBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
-                    height: `${coolRoofBrushDiameterM / Math.max(manifest?.resolution_m ?? 1, 0.01)}px`,
+                    left: `${gridPercent(coolRoofCursor.x)}%`,
+                    top: `${gridPercent(coolRoofCursor.y, "y")}%`,
+                    width: `${displayPixelsForMeters(coolRoofBrushDiameterM)}px`,
+                    height: `${displayPixelsForMeters(coolRoofBrushDiameterM)}px`,
                   }}
                 />
               )}
@@ -3554,10 +4344,10 @@ function App() {
                 <div
                   className="removal-box"
                   style={{
-                    left: `${Math.min(removalBox.startX, removalBox.currentX) / 10.01}%`,
-                    top: `${Math.min(removalBox.startY, removalBox.currentY) / 10.01}%`,
-                    width: `${Math.abs(removalBox.currentX - removalBox.startX) / 10.01}%`,
-                    height: `${Math.abs(removalBox.currentY - removalBox.startY) / 10.01}%`,
+                    left: `${gridPercent(Math.min(removalBox.startX, removalBox.currentX))}%`,
+                    top: `${gridPercent(Math.min(removalBox.startY, removalBox.currentY), "y")}%`,
+                    width: `${gridPercent(Math.abs(removalBox.currentX - removalBox.startX))}%`,
+                    height: `${gridPercent(Math.abs(removalBox.currentY - removalBox.startY), "y")}%`,
                   }}
                 />
               )}
@@ -3565,10 +4355,10 @@ function App() {
                 <div
                   className={`cool-roof-box ${activeRoofKind === "green_roof" ? "green" : ""} ${coolRoofEraseMode ? "erase" : ""}`}
                   style={{
-                    left: `${Math.min(coolRoofBox.startX, coolRoofBox.currentX) / 10.01}%`,
-                    top: `${Math.min(coolRoofBox.startY, coolRoofBox.currentY) / 10.01}%`,
-                    width: `${Math.abs(coolRoofBox.currentX - coolRoofBox.startX) / 10.01}%`,
-                    height: `${Math.abs(coolRoofBox.currentY - coolRoofBox.startY) / 10.01}%`,
+                    left: `${gridPercent(Math.min(coolRoofBox.startX, coolRoofBox.currentX))}%`,
+                    top: `${gridPercent(Math.min(coolRoofBox.startY, coolRoofBox.currentY), "y")}%`,
+                    width: `${gridPercent(Math.abs(coolRoofBox.currentX - coolRoofBox.startX))}%`,
+                    height: `${gridPercent(Math.abs(coolRoofBox.currentY - coolRoofBox.startY), "y")}%`,
                   }}
                 />
               )}
@@ -3576,38 +4366,38 @@ function App() {
                 <div
                   className="reflective-erase-box"
                   style={{
-                    left: `${Math.min(reflectiveEraseBox.startX, reflectiveEraseBox.currentX) / 10.01}%`,
-                    top: `${Math.min(reflectiveEraseBox.startY, reflectiveEraseBox.currentY) / 10.01}%`,
-                    width: `${Math.abs(reflectiveEraseBox.currentX - reflectiveEraseBox.startX) / 10.01}%`,
-                    height: `${Math.abs(reflectiveEraseBox.currentY - reflectiveEraseBox.startY) / 10.01}%`,
+                    left: `${gridPercent(Math.min(reflectiveEraseBox.startX, reflectiveEraseBox.currentX))}%`,
+                    top: `${gridPercent(Math.min(reflectiveEraseBox.startY, reflectiveEraseBox.currentY), "y")}%`,
+                    width: `${gridPercent(Math.abs(reflectiveEraseBox.currentX - reflectiveEraseBox.startX))}%`,
+                    height: `${gridPercent(Math.abs(reflectiveEraseBox.currentY - reflectiveEraseBox.startY), "y")}%`,
                   }}
                 />
               )}
               {depaveBox && (
                 <div className={`depave-box ${depaveEraseMode ? "erase" : ""}`} style={{
-                  left: `${Math.min(depaveBox.startX, depaveBox.currentX) / 10.01}%`,
-                  top: `${Math.min(depaveBox.startY, depaveBox.currentY) / 10.01}%`,
-                  width: `${Math.abs(depaveBox.currentX - depaveBox.startX) / 10.01}%`,
-                  height: `${Math.abs(depaveBox.currentY - depaveBox.startY) / 10.01}%`,
+                  left: `${gridPercent(Math.min(depaveBox.startX, depaveBox.currentX))}%`,
+                  top: `${gridPercent(Math.min(depaveBox.startY, depaveBox.currentY), "y")}%`,
+                  width: `${gridPercent(Math.abs(depaveBox.currentX - depaveBox.startX))}%`,
+                  height: `${gridPercent(Math.abs(depaveBox.currentY - depaveBox.startY), "y")}%`,
                 }} />
               )}
               {shadeCanopyEraseBox && (
                 <div className="shade-canopy-erase-box" style={{
-                  left: `${Math.min(shadeCanopyEraseBox.startX, shadeCanopyEraseBox.currentX) / 10.01}%`,
-                  top: `${Math.min(shadeCanopyEraseBox.startY, shadeCanopyEraseBox.currentY) / 10.01}%`,
-                  width: `${Math.abs(shadeCanopyEraseBox.currentX - shadeCanopyEraseBox.startX) / 10.01}%`,
-                  height: `${Math.abs(shadeCanopyEraseBox.currentY - shadeCanopyEraseBox.startY) / 10.01}%`,
+                  left: `${gridPercent(Math.min(shadeCanopyEraseBox.startX, shadeCanopyEraseBox.currentX))}%`,
+                  top: `${gridPercent(Math.min(shadeCanopyEraseBox.startY, shadeCanopyEraseBox.currentY), "y")}%`,
+                  width: `${gridPercent(Math.abs(shadeCanopyEraseBox.currentX - shadeCanopyEraseBox.startX))}%`,
+                  height: `${gridPercent(Math.abs(shadeCanopyEraseBox.currentY - shadeCanopyEraseBox.startY), "y")}%`,
                 }} />
               )}
               {solarCanopyEraseBox && (
                 <div className="solar-canopy-erase-box" style={{
-                  left: `${Math.min(solarCanopyEraseBox.startX, solarCanopyEraseBox.currentX) / 10.01}%`,
-                  top: `${Math.min(solarCanopyEraseBox.startY, solarCanopyEraseBox.currentY) / 10.01}%`,
-                  width: `${Math.abs(solarCanopyEraseBox.currentX - solarCanopyEraseBox.startX) / 10.01}%`,
-                  height: `${Math.abs(solarCanopyEraseBox.currentY - solarCanopyEraseBox.startY) / 10.01}%`,
+                  left: `${gridPercent(Math.min(solarCanopyEraseBox.startX, solarCanopyEraseBox.currentX))}%`,
+                  top: `${gridPercent(Math.min(solarCanopyEraseBox.startY, solarCanopyEraseBox.currentY), "y")}%`,
+                  width: `${gridPercent(Math.abs(solarCanopyEraseBox.currentX - solarCanopyEraseBox.startX))}%`,
+                  height: `${gridPercent(Math.abs(solarCanopyEraseBox.currentY - solarCanopyEraseBox.startY), "y")}%`,
                 }} />
               )}
-              <div className="raster-caption"><strong>CHINATOWN</strong><span>1 m local grid · EPSG:26986</span></div>
+              <div className="raster-caption"><strong>{studyAreaLabel.toUpperCase()}</strong><span>{manifest?.resolution_m ?? DEFAULT_RESOLUTION_M} m local grid · EPSG:26986</span></div>
             </div>
           </div>
 
@@ -3650,6 +4440,7 @@ function App() {
 
           <div className="map-toolbar">
             <button className={`tool-button ${activeView === "map" ? "active" : ""}`} onClick={openMap}><Layers3 size={17} /> Layers</button>
+            {!autoresearchMode && <>
             {activeView === "design" && designIntervention === "trees" && <button className={`tool-button ${placementMode ? "active placement-active" : ""}`} onClick={togglePlacement}><TreePine size={17} /> {placementMode ? "Finish placing" : "Place trees"}</button>}
             {activeView === "design" && designIntervention === "trees" && <button className={`tool-button ${brushMode ? "active placement-active" : ""}`} onClick={toggleBrush}><Paintbrush size={16} /> {brushMode ? "Finish brushing" : "Brush trees"}</button>}
             {activeView === "design" && designIntervention === "trees" && <button className={`tool-button remove-tool ${removalMode ? "active" : ""}`} onClick={toggleRemoval}><Trash2 size={16} /> {removalMode ? "Finish removing" : "Remove trees"}</button>}
@@ -3669,6 +4460,7 @@ function App() {
             {activeView === "design" && (designIntervention === "cool_roof" || designIntervention === "green_roof") && <button className={`tool-button ${coolRoofBrushMode ? "active placement-active" : ""}`} onClick={() => activateRoofTool(activeRoofKind, "brush")}><Paintbrush size={16} /> {coolRoofBrushMode ? "Finish brushing" : "Brush roofs"}</button>}
             {activeView === "design" && (designIntervention === "cool_roof" || designIntervention === "green_roof") && <button className={`tool-button ${coolRoofBoxMode ? "active placement-active" : ""}`} onClick={() => activateRoofTool(activeRoofKind, "box")}><MousePointer2 size={16} /> {coolRoofBoxMode ? "Finish area" : "Select area"}</button>}
             {activeView === "design" && (designIntervention === "cool_roof" || designIntervention === "green_roof") && <button className={`tool-button remove-tool ${coolRoofEraseMode ? "active" : ""}`} onClick={() => activateRoofTool(activeRoofKind, "erase")}><Trash2 size={16} /> {coolRoofEraseMode ? "Finish erasing" : "Erase roofs"}</button>}
+            </>}
             {activeView !== "design" && <button
               className={`tool-button ${comparisonActive ? "active" : ""} ${hasInterventions ? "" : "unavailable"}`}
               disabled={!hasInterventions}
@@ -3723,9 +4515,9 @@ function App() {
           ) : (!resultVisible || resultDataReady) ? <div className="comparison-label baseline-only">{resultVisible ? hasInterventions ? "Intervention estimate" : "Existing conditions" : "Baseline preview"}</div> : null}
         </section>
 
-        <aside className={`control-panel ${panelOpen ? "" : "closed"}`}>
+        <aside className={`control-panel ${panelOpen ? "" : "closed"} ${autoresearchMode ? "autoresearch-preview" : ""}`}>
           <div className="panel-header">
-            <div><span className="eyebrow">{activeView === "map" ? "Explore" : activeView === "design" ? "Design" : resultsUnavailable ? "Unavailable" : resultsAwaitingSolweig ? "Initializing" : simulatedMetric ? "Simulation" : baselineMetric ? "Hybrid" : "Screening"}</span><h1>{activeView === "map" ? "Chinatown baseline" : activeView === "design" ? designIntervention === "trees" ? "Tree interventions" : designIntervention === "reflective" ? "Reflective pavement" : designIntervention === "depave" ? "Pavement to grass" : designIntervention === "shade_canopy" ? "Shade canopies" : designIntervention === "solar_canopy" ? "PV solar canopies" : designIntervention === "green_roof" ? "Green roofs" : "Cool roofs" : resultsUnavailable ? "SOLWEIG unavailable" : resultsAwaitingSolweig ? "Preparing SOLWEIG" : simulatedMetric ? simulationMatchesLayout ? "SOLWEIG results" : "Calibrated results" : baselineMetric ? "SOLWEIG-based results" : "Estimated results"}</h1></div>
+            <div><span className="eyebrow">{activeView === "map" ? "Explore" : activeView === "design" ? "Design" : resultsUnavailable ? "Unavailable" : resultsAwaitingSolweig ? "Initializing" : simulatedMetric ? "Simulation" : baselineMetric ? "Hybrid" : "Screening"}</span><h1>{activeView === "map" ? `${studyAreaLabel} baseline` : activeView === "design" ? designIntervention === "trees" ? "Tree interventions" : designIntervention === "reflective" ? "Reflective pavement" : designIntervention === "depave" ? "Pavement to grass" : designIntervention === "shade_canopy" ? "Shade canopies" : designIntervention === "solar_canopy" ? "PV solar canopies" : designIntervention === "green_roof" ? "Green roofs" : "Cool roofs" : resultsUnavailable ? "SOLWEIG unavailable" : resultsAwaitingSolweig ? "Preparing SOLWEIG" : simulatedMetric ? simulationMatchesLayout ? "SOLWEIG results" : "Calibrated results" : baselineMetric ? "SOLWEIG-based results" : "Estimated results"}</h1></div>
             <button className="icon-button" aria-label="Close controls" onClick={() => setPanelOpen(false)}><PanelRightClose size={19} /></button>
           </div>
 
@@ -3803,12 +4595,16 @@ function App() {
                   <button className={designIntervention === "solar_canopy" ? "active" : ""} onClick={() => selectDesignIntervention("solar_canopy")}><Sparkles size={17} /><span><strong>PV solar canopies</strong><small>{Math.round(solarCanopyAreaM2).toLocaleString()} m² proposed</small></span></button>
                 </div>
               </section>
+              {autoresearchMode && <section className="panel-section autoresearch-design-note">
+                <strong>Archived intervention preview</strong>
+                <span>The policy remains read-only while Autoresearch mode is on. Its tree and canopy icons are visible here; switch intervention types to inspect each treatment, or copy this iteration into Design to edit it.</span>
+              </section>}
               {designIntervention === "trees" ? <>
               <section className="panel-section placement-section">
                 <div className="section-heading"><h2>Add trees</h2><span>{trees.length} placed</span></div>
                 <div className="tree-tool-card">
                   <img src="/assets/tree-cel.png" alt="Cel-shaded deciduous tree" />
-                  <div><strong>Deciduous street tree</strong><span>Pavement and open ground allowed; buildings and water blocked.</span></div>
+                  <div><strong>Deciduous street tree</strong><span>Pedestrian planting pixels only; roadbeds, crossings, narrow walks, obstructions, existing canopy, overlaps, and overspend are blocked.</span></div>
                 </div>
                 <label className="field-label" htmlFor="new-tree-size">Placement size</label>
                 <div className="select-wrap">
@@ -3841,7 +4637,7 @@ function App() {
                     <small>Drag one stroke to place separately selectable trees. One stroke is one undo action.</small>
                   </div>
                 )}
-                <div className={`placement-status ${placementMaskStatus}`}><span />{placementMaskStatus === "ready" ? "Offline placement check ready" : placementMaskStatus === "loading" ? "Loading offline placement check…" : "Placement check unavailable"}</div>
+                <div className={`placement-status ${placementMaskStatus}`}><span />{placementMaskStatus === "ready" ? "Strict policy siting check ready" : placementMaskStatus === "loading" ? "Loading strict policy siting check…" : "Placement check unavailable"}</div>
                 {lastAction && (lastAction.type === "place" || lastAction.type === "remove") && (
                   <div className={`action-result ${lastAction.type}`}><span>{lastAction.type === "place" ? "Placed" : "Removed"} {lastAction.trees.length} tree{lastAction.trees.length === 1 ? "" : "s"}.</span><button onClick={undoLastAction}>Undo</button></div>
                 )}
@@ -3893,7 +4689,7 @@ function App() {
                   <div className={`placement-status ${pavementMaskStatus}`}><span />{pavementMaskStatus === "ready" ? `${streetSegments.length} street segments · offline pavement mask ready` : pavementMaskStatus === "loading" ? "Loading pavement map…" : "Pavement map unavailable"}</div>
                   <div className="reflective-totals"><div><span>Valid coated area</span><strong>{Math.round(reflectiveAreaM2).toLocaleString()} m²</strong></div><div><span>Estimated cost</span><strong>{formatCost(reflectiveCostEstimate)}</strong></div></div>
                   {lastAction && (lastAction.type === "reflective-paint" || lastAction.type === "reflective-erase") && (
-                    <div className={`action-result ${lastAction.type === "reflective-paint" ? "place" : "remove"}`}><span>{lastAction.type === "reflective-paint" ? "Coated" : "Erased"} {lastAction.pixels.length.toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
+                    <div className={`action-result ${lastAction.type === "reflective-paint" ? "place" : "remove"}`}><span>{lastAction.type === "reflective-paint" ? "Coated" : "Erased"} {pixelAreaM2(lastAction.pixels.length).toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
                   )}
                 </section>
                 <section className="panel-section reflective-model-section">
@@ -3920,7 +4716,7 @@ function App() {
                   <div className={`placement-status ${depavableMaskStatus}`}><span />{depavableMaskStatus === "ready" ? "Offline sidewalk, plaza, and parking eligibility ready" : depavableMaskStatus === "loading" ? "Loading non-road pavement map…" : "Non-road pavement map unavailable"}</div>
                   <div className="reflective-totals"><div><span>Converted area</span><strong>{Math.round(depavedAreaM2).toLocaleString()} m²</strong></div><div><span>Estimated cost</span><strong>{formatCost(depavedCostEstimate)}</strong></div></div>
                   {lastAction && (lastAction.type === "depave-add" || lastAction.type === "depave-remove") && (
-                    <div className={`action-result ${lastAction.type === "depave-add" ? "place" : "remove"}`}><span>{lastAction.type === "depave-add" ? "Converted" : "Restored"} {lastAction.pixels.length.toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
+                    <div className={`action-result ${lastAction.type === "depave-add" ? "place" : "remove"}`}><span>{lastAction.type === "depave-add" ? "Converted" : "Restored"} {pixelAreaM2(lastAction.pixels.length).toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
                   )}
                   <p className="cool-roof-help">Grass conversion and reflective coating are mutually exclusive pixel by pixel. Applying either one replaces the other, and Undo restores it. Trees may be planted on converted grass.</p>
                 </section>
@@ -3949,10 +4745,10 @@ function App() {
                     <small>Select side and Brush use the shared sidewalk canopy eligibility map. Sail icons are spaced every {SHADE_CANOPY_ICON_SPACING_M} m and may bridge gaps up to {CANOPY_ICON_PAVEMENT_TOLERANCE_M} m from pavement, but never building roofs.</small>
                     <small>Fabric and PV canopies are alternative overhead treatments and cannot occupy the same pixel.</small>
                   </div>
-                  <div className={`placement-status ${depavableMaskStatus}`}><span />{depavableMaskStatus === "ready" ? `${streetSegments.length} mapped segments · one-sided selection ready` : depavableMaskStatus === "loading" ? "Loading eligible pavement and segments…" : "Canopy placement map unavailable"}</div>
+                  <div className={`placement-status ${depavableMaskStatus}`}><span />{depavableMaskStatus === "ready" ? `${streetSegments.length} mapped segments · strict pedestrian siting ready` : depavableMaskStatus === "loading" ? "Loading policy-valid pavement and segments…" : "Canopy placement map unavailable"}</div>
                   <div className="reflective-totals"><div><span>Canopy area</span><strong>{Math.round(shadeCanopyAreaM2).toLocaleString()} m²</strong></div><div><span>Estimated cost</span><strong>{formatCost(shadeCanopyCostEstimate)}</strong></div></div>
                   {lastAction && (lastAction.type === "shade-canopy-add" || lastAction.type === "shade-canopy-remove") && (
-                    <div className={`action-result ${lastAction.type === "shade-canopy-add" ? "place" : "remove"}`}><span>{lastAction.type === "shade-canopy-add" ? "Added" : "Removed"} {lastAction.pixels.length.toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
+                    <div className={`action-result ${lastAction.type === "shade-canopy-add" ? "place" : "remove"}`}><span>{lastAction.type === "shade-canopy-add" ? "Added" : "Removed"} {pixelAreaM2(lastAction.pixels.length).toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
                   )}
                 </section>
                 <section className="panel-section reflective-model-section">
@@ -3980,10 +4776,10 @@ function App() {
                     <small>Select side and Brush use the same sidewalk eligibility map as fabric canopies. PV icons are spaced every {SHADE_CANOPY_ICON_SPACING_M} m and may bridge gaps up to {CANOPY_ICON_PAVEMENT_TOLERANCE_M} m from pavement, but never building roofs.</small>
                     <small>PV and fabric canopies are alternative overhead treatments and cannot occupy the same pixel.</small>
                   </div>
-                  <div className={`placement-status ${depavableMaskStatus}`}><span />{depavableMaskStatus === "ready" ? `${streetSegments.length} mapped segments · one-sided selection ready` : depavableMaskStatus === "loading" ? "Loading eligible pavement and segments…" : "Solar-canopy placement map unavailable"}</div>
+                  <div className={`placement-status ${depavableMaskStatus}`}><span />{depavableMaskStatus === "ready" ? `${streetSegments.length} mapped segments · strict pedestrian siting ready` : depavableMaskStatus === "loading" ? "Loading policy-valid pavement and segments…" : "Solar-canopy placement map unavailable"}</div>
                   <div className="reflective-totals"><div><span>Canopy area</span><strong>{Math.round(solarCanopyAreaM2).toLocaleString()} m²</strong></div><div><span>Estimated cost</span><strong>{formatCost(solarCanopyCostEstimate)}</strong></div></div>
                   {lastAction && (lastAction.type === "solar-canopy-add" || lastAction.type === "solar-canopy-remove") && (
-                    <div className={`action-result ${lastAction.type === "solar-canopy-add" ? "place" : "remove"}`}><span>{lastAction.type === "solar-canopy-add" ? "Added" : "Removed"} {lastAction.pixels.length.toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
+                    <div className={`action-result ${lastAction.type === "solar-canopy-add" ? "place" : "remove"}`}><span>{lastAction.type === "solar-canopy-add" ? "Added" : "Removed"} {pixelAreaM2(lastAction.pixels.length).toLocaleString()} m².</span><button onClick={undoLastAction}>Undo</button></div>
                   )}
                 </section>
                 <section className="panel-section reflective-model-section">
@@ -4009,10 +4805,10 @@ function App() {
                     <input id="cool-roof-diameter" type="range" min="6" max="50" step="2" value={coolRoofBrushDiameterM} onChange={(event) => setCoolRoofBrushDiameterM(Number(event.target.value))} />
                     <small>Touching any pixel of a mapped building applies the treatment to that whole roof.</small>
                   </div>}
-                  <div className={`placement-status ${roofRegionsStatus}`}><span />{roofRegionsStatus === "ready" ? "Offline building-roof selection ready" : roofRegionsStatus === "loading" ? "Loading mapped roof regions…" : "Roof selection map unavailable"}</div>
+                  <div className={`placement-status ${roofRegionsStatus}`}><span />{roofRegionsStatus === "ready" ? "Whole-roof policy siting check ready" : roofRegionsStatus === "loading" ? "Loading policy-valid roof regions…" : "Roof selection map unavailable"}</div>
                   <div className="reflective-totals"><div><span>Selected roof area</span><strong>{Math.round(activeRoofKind === "green_roof" ? greenRoofAreaM2 : coolRoofAreaM2).toLocaleString()} m²</strong></div><div><span>Estimated cost</span><strong>{formatCost(activeRoofKind === "green_roof" ? greenRoofCostEstimate : coolRoofCostEstimate)}</strong></div></div>
                   {lastAction && (lastAction.type === "roof-add" || lastAction.type === "roof-remove") && lastAction.kind === activeRoofKind && (
-                    <div className={`action-result ${lastAction.type === "roof-add" ? "place" : "remove"}`}><span>{lastAction.type === "roof-add" ? "Added" : "Removed"} {lastAction.pixels.length.toLocaleString()} m² of roof.</span><button onClick={undoLastAction}>Undo</button></div>
+                    <div className={`action-result ${lastAction.type === "roof-add" ? "place" : "remove"}`}><span>{lastAction.type === "roof-add" ? "Added" : "Removed"} {pixelAreaM2(lastAction.pixels.length).toLocaleString()} m² of roof.</span><button onClick={undoLastAction}>Undo</button></div>
                   )}
                   <p className="cool-roof-help">Click toggles one whole roof. The brush and area selector always apply complete roofs. Erase removes every selected roof intersecting its rectangle.</p>
                 </section>
@@ -4083,16 +4879,71 @@ function App() {
                 <div className="section-heading"><h2>Intervention cost</h2><span>Non-spatial</span></div>
                 <div className="cost-total"><span>Estimated total</span><strong>{formatCost(costEstimate)}</strong><small>{formatCost(costLow)}–{formatCost(costHigh)} indicative range</small></div>
                 <div className="cost-breakdown">
-                  <div><span>Small trees</span><strong>{smallTreeCount} × {formatCost(TREE_COST.small)}</strong></div>
-                  <div><span>Medium trees</span><strong>{mediumTreeCount} × {formatCost(TREE_COST.medium)}</strong></div>
-                  {reflectivePixelCount > 0 && <div><span>Reflective pavement</span><strong>{Math.round(reflectiveAreaM2).toLocaleString()} m² × $8</strong></div>}
-                  {coolRoofPixelCount > 0 && <div><span>Cool roofs</span><strong>{Math.round(coolRoofAreaM2).toLocaleString()} m² × $25</strong></div>}
-                  {greenRoofPixelCount > 0 && <div><span>Green roofs</span><strong>{Math.round(greenRoofAreaM2).toLocaleString()} m² × $250</strong></div>}
-                  {depavedPixelCount > 0 && <div><span>Pavement to grass</span><strong>{Math.round(depavedAreaM2).toLocaleString()} m² × $90</strong></div>}
-                  {shadeCanopyPixelCount > 0 && <div><span>Shade canopies</span><strong>{Math.round(shadeCanopyAreaM2).toLocaleString()} m² × $200</strong></div>}
-                  {solarCanopyPixelCount > 0 && <div><span>PV solar canopies</span><strong>{Math.round(solarCanopyAreaM2).toLocaleString()} m² × $450</strong></div>}
+                  <div><span>Small trees</span><strong>{smallTreeCount} × {formatUnitCost(treeCost.small)}</strong></div>
+                  <div><span>Medium trees</span><strong>{mediumTreeCount} × {formatUnitCost(treeCost.medium)}</strong></div>
+                  {reflectivePixelCount > 0 && <div><span>Reflective pavement</span><strong>{Math.round(reflectiveAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("light_road"))}</strong></div>}
+                  {coolRoofPixelCount > 0 && <div><span>Cool roofs</span><strong>{Math.round(coolRoofAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("cool_roof"))}</strong></div>}
+                  {greenRoofPixelCount > 0 && <div><span>Green roofs</span><strong>{Math.round(greenRoofAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("green_roof"))}</strong></div>}
+                  {depavedPixelCount > 0 && <div><span>Pavement to grass</span><strong>{Math.round(depavedAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("grass_conversion"))}</strong></div>}
+                  {shadeCanopyPixelCount > 0 && <div><span>Shade canopies</span><strong>{Math.round(shadeCanopyAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("shade_canopy"))}</strong></div>}
+                  {solarCanopyPixelCount > 0 && <div><span>PV solar canopies</span><strong>{Math.round(solarCanopyAreaM2).toLocaleString()} m² × {formatUnitCost(unitCost("solar_canopy"))}</strong></div>}
                 </div>
                 <p>Order-of-magnitude installation costs with a ±35% uncertainty band; they remain intentionally separate from the map.</p>
+              </section>
+
+              <section className="panel-section policy-score-section">
+                <div className="section-heading"><h2>Policy score</h2><span>Audit + SOLWEIG</span></div>
+                <p className="policy-score-intro">{autoresearchMode ? "Archived score for the selected feasible policy. Use the progress controls above to compare it with other iterations." : "Evaluate this layout with the repository's policy contract: physical siting, budget, pedestrian heat relief, access, equity, co-benefits, and cost efficiency."}</p>
+                <label className="policy-budget-field" htmlFor="policy-budget">
+                  <span>Budget for {studyAreaLabel}</span>
+                  <div><span>$</span><input id="policy-budget" type="number" min="1" max="1000000000" step="10000" value={policyScoringBudget} disabled={policyScoreRunning || autoresearchMode} onChange={(event) => setPolicyScoringBudget(Math.max(1, Math.min(1_000_000_000, Number(event.target.value) || 1)))} /></div>
+                  <small>Repository standard: $500,000 · current estimated spend: {formatCost(costEstimate)}</small>
+                </label>
+                {budgetExceeded && <div className="simulation-error">This layout is {formatCost(costEstimate - policyScoringBudget)} over budget. Remove interventions or raise the budget before scoring.</div>}
+
+                {policyScoreRunning ? (
+                  <div className="simulation-progress-card policy-score-progress" aria-live="polite">
+                    <div><Cpu size={18} /><span><strong>{policyScoreJob?.stage}</strong><small>{policyScoreJob?.elapsed_seconds ? `${Math.round(policyScoreJob.elapsed_seconds)} s elapsed` : "Starting local scorer…"}</small></span><output>{policyScoreJob?.progress ?? 0}%</output></div>
+                    <progress max="100" value={policyScoreJob?.progress ?? 0} />
+                    <button onClick={cancelPolicyScoring}><X size={14} /> Cancel score</button>
+                  </div>
+                ) : policyScore ? (
+                  <>
+                    <div className={`policy-verdict ${policyScore.verdict} ${policyScoreMatchesLayout ? "" : "stale"}`}>
+                      {policyScore.verdict === "feasible" ? <CheckCircle2 size={19} /> : <Info size={19} />}
+                      <div><strong>{policyScore.verdict === "feasible" ? "Feasible policy" : "Layout needs revision"}</strong><span>{policyScoreMatchesLayout ? autoresearchMode ? `Archived ${policyScore.run.scenarios.join(", ")} score · 10 AM, 1 PM, and 4 PM` : `${selectedScenario.shortLabel} · 10 AM, 1 PM, and 4 PM` : "Saved score · layout, scenario, or budget has changed"}</span></div>
+                    </div>
+                    {policyScore.objectives ? (
+                      <div className="policy-objective-grid">
+                        <div className="primary"><span>Pedestrian UTCI relief</span><strong>{formatPolicyMetric(policyScore.objectives.heat_relief_c, "°C")}</strong><small>Population-weighted</small></div>
+                        <div><span>Expected relief</span><strong>{formatPolicyMetric(policyScore.objectives.expected_relief_c, "°C")}</strong><small>Lifecycle-adjusted</small></div>
+                        <div><span>Access gain</span><strong>{formatPolicyMetric(policyScore.objectives.access_gain_pp, " pp")}</strong><small>Moved below 32°C UTCI</small></div>
+                        <div><span>Equity ratio</span><strong>{formatPolicyMetric(policyScore.objectives.equity_ratio, "×")}</strong><small>Top-vulnerability relief ÷ overall</small></div>
+                        <div><span>Greened area</span><strong>{formatPolicyMetric(policyScore.objectives.cobenefit_greened_pct, "%")}</strong><small>Share of walkable ground</small></div>
+                        <div><span>Cost efficiency</span><strong>{formatPolicyMetric(policyScore.objectives.cost_efficiency_person_c_per_100k, "")}</strong><small>person-°C per $100k</small></div>
+                        <div><span>MRT relief</span><strong>{formatPolicyMetric(policyScore.objectives.tmrt_relief_c, "°C")}</strong><small>Diagnostic</small></div>
+                        <div><span>PV generation</span><strong>{formatPolicyMetric(policyScore.objectives.pv_mwh_per_yr, " MWh/yr", 1)}</strong><small>Order-of-magnitude co-benefit</small></div>
+                      </div>
+                    ) : (
+                      <div className="policy-violations">
+                        <strong>Audit messages</strong>
+                        {Object.entries(policyScore.violations).flatMap(([aoi, messages]) => messages.map((message, index) => <p key={`${aoi}-${index}`}><Info size={14} /><span>{message}</span></p>))}
+                        <small>No SOLWEIG simulation was run because feasibility is all-or-nothing.</small>
+                      </div>
+                    )}
+                    {!autoresearchMode && <button className="policy-score-run" disabled={!hasInterventions || !policyScoringReady || activeSimulationRunning || budgetExceeded} onClick={startPolicyScoring}>{policyScoreMatchesLayout ? "Score this layout again" : "Score current layout"}</button>}
+                  </>
+                ) : (
+                  <div className="policy-score-empty">
+                    <Cpu size={20} />
+                    <div><strong>No policy score yet</strong><span>The audit is fast; a feasible design then runs three daytime SOLWEIG timesteps and can take several minutes.</span></div>
+                    {!autoresearchMode && <button disabled={!hasInterventions || !policyScoringReady || activeSimulationRunning || budgetExceeded} onClick={startPolicyScoring}>Run policy score</button>}
+                  </div>
+                )}
+                {policyScoringChecked && !policyScoringReady && <div className="simulation-error">The local policy scorer or required {studyAreaLabel} inputs are unavailable.</div>}
+                {activeSimulationRunning && !policyScoreRunning && <small className="policy-score-note">Wait for the current map simulation to finish before starting the policy score.</small>}
+                {policyScoreError && <div className="simulation-error">{policyScoreError}</div>}
+                <p className="policy-score-note">Scored on the {manifest?.resolution_m ?? DEFAULT_RESOLUTION_M} m {studyAreaLabel} grid for the selected climate scenario, July 27 at 10 AM, 1 PM, and 4 PM. Compare policy scores only at the same resolution, scenario, budget, and lifecycle horizon.</p>
               </section>
 
               <section className="panel-section assumptions-section">
@@ -4100,10 +4951,10 @@ function App() {
                 <ul>
                   <li>{selectedScenario.shortLabel} on July 27 at {selectedTime.label}.</li>
                   {simulatedMetric ? <>
-                    <li>{simulationResult?.model} with local 1 m DSM, DEM, canopy, and land cover.</li>
+                    <li>{simulationResult?.model} with local {manifest?.resolution_m ?? DEFAULT_RESOLUTION_M} m DSM, DEM, canopy, and land cover.</li>
                     <li>{simulationMatchesLayout ? "The displayed layout matches the completed simulation." : "The physical simulation is the baseline; later design edits are layered on with the fast heuristic."}</li>
                   </> : baselineMetric ? <>
-                    <li>{solweigBaseline?.model} existing-conditions field with local 1 m DSM, DEM, canopy, and land cover.</li>
+                    <li>{solweigBaseline?.model} existing-conditions field with local {manifest?.resolution_m ?? DEFAULT_RESOLUTION_M} m DSM, DEM, canopy, and land cover.</li>
                     <li>{hasInterventions ? "The proposed intervention difference is a fast spatial heuristic until the current layout is simulated." : "No proposed intervention is included in this baseline."}</li>
                     {reflectivePixelCount > 0 && <li>Reflective pavement uses 6.1°C local surface and 0.8°C local UTCI screening effects, area-weighted for the study summary; MRT requires a full SOLWEIG run.</li>}
                     {coolRoofPixelCount > 0 && <li>Cool roofs have no heuristic temperature adjustment; their albedo effect is included only after a full SOLWEIG run.</li>}
@@ -4139,7 +4990,7 @@ function App() {
                   </div>
                 ) : (
                   <div className="simulation-summary-card">
-                    {simulationResult ? <><CheckCircle2 size={20} /><div><strong>Latest run saved</strong><span>{SCENARIOS[simulationResult.scenario as ScenarioKey]?.shortLabel ?? simulationResult.scenario} · {TIME_OPTIONS.find((option) => option.hour === simulationResult.hour)?.label ?? `${simulationResult.hour}:00`} · {simulationResult.tree_snapshot.length} tree{simulationResult.tree_snapshot.length === 1 ? "" : "s"} · {(simulationResult.reflective_snapshot?.count ?? 0).toLocaleString()} m² reflective · {(simulationResult.depaved_pavement_snapshot?.count ?? 0).toLocaleString()} m² grass conversion · {(simulationResult.shade_canopy_snapshot?.count ?? 0).toLocaleString()} m² shade canopy · {(simulationResult.solar_canopy_snapshot?.count ?? 0).toLocaleString()} m² solar canopy · {(simulationResult.cool_roof_snapshot?.count ?? 0).toLocaleString()} m² cool roof · {(simulationResult.green_roof_snapshot?.count ?? 0).toLocaleString()} m² green roof</span></div></> : <><Cpu size={20} /><div><strong>No full result yet</strong><span>The fast estimate remains active until you choose to run.</span></div></>}
+                    {simulationResult ? <><CheckCircle2 size={20} /><div><strong>Latest run saved</strong><span>{SCENARIOS[simulationResult.scenario as ScenarioKey]?.shortLabel ?? simulationResult.scenario} · {TIME_OPTIONS.find((option) => option.hour === simulationResult.hour)?.label ?? `${simulationResult.hour}:00`} · {simulationResult.tree_snapshot.length} tree{simulationResult.tree_snapshot.length === 1 ? "" : "s"} · {pixelAreaM2(simulationResult.reflective_snapshot?.count ?? 0).toLocaleString()} m² reflective · {pixelAreaM2(simulationResult.depaved_pavement_snapshot?.count ?? 0).toLocaleString()} m² grass conversion · {pixelAreaM2(simulationResult.shade_canopy_snapshot?.count ?? 0).toLocaleString()} m² shade canopy · {pixelAreaM2(simulationResult.solar_canopy_snapshot?.count ?? 0).toLocaleString()} m² solar canopy · {pixelAreaM2(simulationResult.cool_roof_snapshot?.count ?? 0).toLocaleString()} m² cool roof · {pixelAreaM2(simulationResult.green_roof_snapshot?.count ?? 0).toLocaleString()} m² green roof</span></div></> : <><Cpu size={20} /><div><strong>No full result yet</strong><span>The fast estimate remains active until you choose to run.</span></div></>}
                     <button disabled={!simulationReady || !hasInterventions} onClick={() => { setSimulationError(null); setSimulationSetupOpen(true); }}>{simulationResult ? "Run current layout" : "Set up full run"}</button>
                     {!simulationReady && <small>Start the local app with the project virtual environment and generated weather data.</small>}
                     {simulationError && <div className="simulation-error">{simulationError}</div>}
@@ -4150,12 +5001,19 @@ function App() {
           )}
 
           <div className="panel-footer">
-            {activeView === "results" ? !resultDataReady ? <><button className="button primary" disabled><Cpu size={16} /> {resultsUnavailable ? "Result unavailable" : "SOLWEIG running"}</button><p>{resultsUnavailable ? "Check the simulation setup, then return to Results." : "The result will appear automatically when complete."}</p></> : <><button className="button primary" disabled={!hasInterventions || !simulationReady || Boolean(simulationJob && ["queued", "running"].includes(simulationJob.state))} onClick={() => setSimulationSetupOpen(true)}><Play size={16} /> {simulationResult ? "Run SOLWEIG again" : "Run full SOLWEIG"}</button><p>{simulationResult ? "The latest completed run remains active until a new one finishes." : "Optional; the fast estimate uses this completed physical baseline."}</p></> : activeView === "map" ? <><button className="button primary" disabled={!hasInterventions || !simulationReady} onClick={() => { openResults(); setSimulationSetupOpen(true); }}><Play size={16} /> Run full simulation</button><p>Optional physical simulation of all current interventions.</p></> : <><button className="button primary" disabled={!hasInterventions} onClick={saveLayout}><Save size={16} /> Save intervention layout</button><p>{hasInterventions ? "Changes are also saved automatically in this browser." : "Add at least one intervention to save a layout."}</p></>}
+            {autoresearchMode ? <><button className="button primary" disabled={!autoresearchLayoutReady} onClick={copyAutoresearchToDesign}><Save size={16} /> Copy to editable Design</button><p>{activeView === "results" ? "Missing physical results are simulated and cached automatically." : "The archived workspace stays read-only until copied."}</p></> : activeView === "results" ? !resultDataReady ? <><button className="button primary" disabled><Cpu size={16} /> {resultsUnavailable ? "Result unavailable" : "SOLWEIG running"}</button><p>{resultsUnavailable ? "Check the simulation setup, then return to Results." : "The result will appear automatically when complete."}</p></> : <><button className="button primary" disabled={!hasInterventions || !simulationReady || Boolean(simulationJob && ["queued", "running"].includes(simulationJob.state))} onClick={() => setSimulationSetupOpen(true)}><Play size={16} /> {simulationResult ? "Run SOLWEIG again" : "Run full SOLWEIG"}</button><p>{simulationResult ? "The latest completed run remains active until a new one finishes." : "Optional; the fast estimate uses this completed physical baseline."}</p></> : activeView === "map" ? <><button className="button primary" disabled={!hasInterventions || !simulationReady} onClick={() => { openResults(); setSimulationSetupOpen(true); }}><Play size={16} /> Run full simulation</button><p>Optional physical simulation of all current interventions.</p></> : <><button className="button primary" disabled={!hasInterventions} onClick={saveLayout}><Save size={16} /> Save intervention layout</button><p>{hasInterventions ? "Changes are also saved automatically in this browser." : "Add at least one intervention to save a layout."}</p></>}
           </div>
         </aside>
 
         {!panelOpen && <button className="reopen-panel" onClick={() => setPanelOpen(true)}><SlidersHorizontal size={18} /> Controls</button>}
       </main>
+
+      <StudyAreaOverview
+        open={overviewOpen}
+        selectedArea={ACTIVE_AOI}
+        onClose={() => setOverviewOpen(false)}
+        onSelect={selectStudyArea}
+      />
 
       {resetConfirmOpen && (
         <div className="reset-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setResetConfirmOpen(false); }}>
@@ -4163,7 +5021,7 @@ function App() {
             <span className="reset-dialog-icon"><RotateCcw size={20} /></span>
             <div>
               <h2 id="reset-title">Reset to a new workspace?</h2>
-              <p id="reset-description">This removes proposed trees, reflective pavement, pavement-to-grass conversion, shade canopies, solar canopies, cool roofs, green roofs, saved SOLWEIG results, cached browser baselines, tool history, and view settings, then reloads the app.</p>
+              <p id="reset-description">This clears the {studyAreaLabel} workspace: interventions, saved SOLWEIG results, the latest policy score, cached browser baselines, tool history, and view settings. Other study areas are unchanged.</p>
             </div>
             <div className="reset-dialog-actions">
               <button className="button secondary" onClick={() => setResetConfirmOpen(false)}>Cancel</button>

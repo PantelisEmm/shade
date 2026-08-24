@@ -25,6 +25,8 @@ type Props = {
   reflectiveMask: RasterMask;
   width: number;
   height: number;
+  metricsUrl: string;
+  resolutionM: number;
   displayMin: number;
   displayMax: number;
   afterClipPercent: number;
@@ -44,18 +46,18 @@ const COLOR_STOPS = [
   [147, 48, 61],
 ];
 
-let encodedMetricsPromise: Promise<HTMLImageElement> | null = null;
+const encodedMetricsPromises = new Map<string, Promise<HTMLImageElement>>();
 
-const loadEncodedMetrics = () => {
-  if (!encodedMetricsPromise) {
-    encodedMetricsPromise = new Promise((resolve, reject) => {
+const loadEncodedMetrics = (source: string) => {
+  if (!encodedMetricsPromises.has(source)) {
+    encodedMetricsPromises.set(source, new Promise((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
       image.onerror = () => reject(new Error("Screening metric raster is unavailable"));
-      image.src = "/data/chinatown/screening_metrics.png";
-    });
+      image.src = source;
+    }));
   }
-  return encodedMetricsPromise;
+  return encodedMetricsPromises.get(source)!;
 };
 
 const buildPalette = () => {
@@ -87,13 +89,13 @@ const loadExactImage = (source: string) => {
   return exactImagePromises.get(source)!;
 };
 
-const buildReduction = (trees: ScreeningTree[], metric: TemperatureMetric, width: number, height: number) => {
+const buildReduction = (trees: ScreeningTree[], metric: TemperatureMetric, width: number, height: number, resolutionM: number) => {
   const reduction = new Float32Array(width * height);
   for (const tree of trees) {
     const presetDiameter = tree.size === "small" ? 3 : 5;
     const sizeScale = Math.min(1.6, Math.max(0.55, Math.sqrt(tree.crownDiameterM / presetDiameter) * Math.sqrt(tree.heightM / 5)));
     const peakReduction = (tree.size === "small" ? SMALL_EFFECT[metric] : MEDIUM_EFFECT[metric]) * sizeScale;
-    const sigma = Math.max(12, tree.crownDiameterM * 3.4);
+    const sigma = Math.max(12, tree.crownDiameterM * 3.4) / Math.max(resolutionM, 0.01);
     const radius = Math.ceil(sigma * 3.2);
     const minX = Math.max(0, Math.floor(tree.x - radius));
     const maxX = Math.min(width - 1, Math.ceil(tree.x + radius));
@@ -131,6 +133,8 @@ export default function ScreeningMetricLayer({
   reflectiveMask,
   width,
   height,
+  metricsUrl,
+  resolutionM,
   displayMin,
   displayMax,
   afterClipPercent,
@@ -146,7 +150,7 @@ export default function ScreeningMetricLayer({
     const usesSimulation = Boolean(simulation && metric !== "surface");
     const images = usesSimulation && simulation
       ? Promise.all([loadExactImage(simulation.baselineUrl), loadExactImage(simulation.interventionUrl)])
-      : loadEncodedMetrics().then((image) => [image, image]);
+      : loadEncodedMetrics(metricsUrl).then((image) => [image, image]);
 
     images.then(([baselineImage, interventionImage]) => {
       if (cancelled || !beforeRef.current || !afterRef.current) return;
@@ -172,8 +176,8 @@ export default function ScreeningMetricLayer({
         baseline[pixel] = displayMin + (encodedBaseline[pixel * 4 + channel] / 255) * (displayMax - displayMin);
       }
 
-      const currentReduction = buildReduction(trees, metric, width, height);
-      const snapshotReduction = usesSimulation && simulation ? buildReduction(simulation.snapshotTrees, metric, width, height) : null;
+      const currentReduction = buildReduction(trees, metric, width, height, resolutionM);
+      const snapshotReduction = usesSimulation && simulation ? buildReduction(simulation.snapshotTrees, metric, width, height, resolutionM) : null;
       const currentReflectiveReduction = buildReflectiveReduction(reflectiveMask, metric, width, height);
       const snapshotReflectiveReduction = usesSimulation && simulation ? buildReflectiveReduction(simulation.snapshotReflectiveMask, metric, width, height) : null;
 
@@ -210,7 +214,7 @@ export default function ScreeningMetricLayer({
     });
 
     return () => { cancelled = true; };
-  }, [metric, trees, reflectiveMask, width, height, displayMin, displayMax, simulation]);
+  }, [metric, trees, reflectiveMask, width, height, metricsUrl, resolutionM, displayMin, displayMax, simulation]);
 
   return (
     <div className="screening-metric-layer" aria-label={`${metric} ${simulation && metric !== "surface" ? "SOLWEIG-calibrated" : "screening"} comparison raster`}>
