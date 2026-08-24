@@ -109,37 +109,115 @@ const formatCost = (value: number | null | undefined) => value == null
   ? "Not available"
   : `$${Math.round(value).toLocaleString()}`;
 
-const ProgressChart = ({ iterations, selectedId, onSelect }: {
+const LineageTree = ({ iterations, selectedId, bestId, onSelect }: {
   iterations: ArchiveIteration[];
   selectedId: string;
+  bestId?: string;
   onSelect: (id: string) => void;
 }) => {
-  const width = 620;
-  const height = 112;
-  const padding = 14;
+  const width = 760;
+  const height = 142;
+  const paddingX = 18;
+  const paddingY = 13;
+  const graph = useMemo(() => {
+    const byId = new Map(iterations.map((iteration) => [iteration.id, iteration]));
+    const depths = new Map<string, number>();
+    const depthFor = (id: string, trail = new Set<string>()): number => {
+      const cached = depths.get(id);
+      if (cached !== undefined) return cached;
+      if (trail.has(id)) return 0;
+      const iteration = byId.get(id);
+      const parentId = iteration?.parent_id;
+      const depth = parentId && byId.has(parentId)
+        ? depthFor(parentId, new Set([...trail, id])) + 1
+        : 0;
+      depths.set(id, depth);
+      return depth;
+    };
+    iterations.forEach((iteration) => depthFor(iteration.id));
+    const maximumDepth = Math.max(...depths.values(), 0);
+    const rows = Array.from({ length: maximumDepth + 1 }, () => [] as ArchiveIteration[]);
+    iterations.forEach((iteration) => rows[depths.get(iteration.id) ?? 0].push(iteration));
+    rows.forEach((row) => row.sort((a, b) => a.generation - b.generation || a.id.localeCompare(b.id)));
+    const positions = new Map<string, { x: number; y: number }>();
+    rows.forEach((row, depth) => row.forEach((iteration, index) => {
+      const x = row.length === 1
+        ? width / 2
+        : paddingX + index * (width - paddingX * 2) / (row.length - 1);
+      const y = maximumDepth === 0
+        ? height / 2
+        : paddingY + depth * (height - paddingY * 2) / maximumDepth;
+      positions.set(iteration.id, { x, y });
+    }));
+    return { byId, depths, maximumDepth, positions };
+  }, [iterations]);
+  const selected = graph.byId.get(selectedId);
+  const ancestors = new Set<string>();
+  let ancestor = selected;
+  while (ancestor?.parent_id && graph.byId.has(ancestor.parent_id) && !ancestors.has(ancestor.parent_id)) {
+    ancestors.add(ancestor.parent_id);
+    ancestor = graph.byId.get(ancestor.parent_id);
+  }
   const values = iterations.map((iteration) => iteration.fitness ?? iteration.objectives?.heat_relief_c ?? 0);
   const minimum = Math.min(...values, 0);
   const maximum = Math.max(...values, minimum + 0.001);
-  const x = (index: number) => iterations.length <= 1 ? width / 2 : padding + index * (width - padding * 2) / (iterations.length - 1);
-  const y = (value: number) => height - padding - ((value - minimum) / (maximum - minimum)) * (height - padding * 2);
-  const path = values.map((value, index) => `${index ? "L" : "M"}${x(index)},${y(value)}`).join(" ");
+  const nodeColor = (value: number) => {
+    const amount = (value - minimum) / (maximum - minimum);
+    const lightness = 78 - amount * 35;
+    return `hsl(263 34% ${lightness}%)`;
+  };
+  const curve = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+    const middle = (from.y + to.y) / 2;
+    return `M${from.x},${from.y} C${from.x},${middle} ${to.x},${middle} ${to.x},${to.y}`;
+  };
+  const inspirations = (selected?.inspiration_ids ?? [])
+    .filter((id) => id !== selected?.parent_id)
+    .map((id) => graph.positions.get(id))
+    .filter((position): position is { x: number; y: number } => Boolean(position));
+  const selectedPosition = graph.positions.get(selectedId);
   return (
-    <div className="autoresearch-chart-wrap">
-      <svg className="autoresearch-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Feasible policy fitness by iteration">
-        <line x1={padding} y1={height - padding} x2={width - padding} y2={height - padding} />
-        <path d={path} />
-        {iterations.map((iteration, index) => (
-          <circle
-            key={iteration.id}
-            className={iteration.id === selectedId ? "selected" : ""}
-            cx={x(index)}
-            cy={y(values[index])}
-            r={iteration.id === selectedId ? 5.5 : 3.5}
-            onClick={() => onSelect(iteration.id)}
-          />
+    <div className="autoresearch-lineage-wrap">
+      <div className="autoresearch-lineage-heading"><strong>Policy lineage</strong><span>{iterations.length} feasible policies · {graph.maximumDepth + 1} levels</span></div>
+      <svg className="autoresearch-lineage" viewBox={`0 0 ${width} ${height}`} role="tree" aria-label="Feasible policy lineage tree">
+        {iterations.map((iteration) => {
+          const from = iteration.parent_id ? graph.positions.get(iteration.parent_id) : undefined;
+          const to = graph.positions.get(iteration.id);
+          if (!from || !to) return null;
+          const highlighted = iteration.id === selectedId || ancestors.has(iteration.id);
+          return <path key={`${iteration.id}-parent`} className={`lineage-edge ${highlighted ? "active" : ""}`} d={curve(from, to)} />;
+        })}
+        {selectedPosition && inspirations.map((position, index) => (
+          <path key={`inspiration-${index}`} className="lineage-edge inspiration" d={curve(position, selectedPosition)} />
         ))}
+        {iterations.map((iteration, index) => {
+          const position = graph.positions.get(iteration.id);
+          if (!position) return null;
+          const value = values[index];
+          const className = [
+            "lineage-node",
+            iteration.id === selectedId ? "selected" : "",
+            iteration.id === bestId ? "best" : "",
+            ancestors.has(iteration.id) ? "ancestor" : "",
+          ].filter(Boolean).join(" ");
+          return (
+            <g
+              key={iteration.id}
+              className={className}
+              role="treeitem"
+              aria-label={`Generation ${iteration.generation}: ${iteration.policy_name ?? iteration.id}`}
+              tabIndex={iteration.id === selectedId ? 0 : -1}
+              transform={`translate(${position.x} ${position.y})`}
+              onClick={() => onSelect(iteration.id)}
+              onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(iteration.id); }}
+            >
+              <circle r={iteration.id === selectedId ? 5.8 : 4.1} style={{ fill: nodeColor(value) }} />
+              {iteration.id === bestId && <circle className="lineage-best-ring" r={7.2} />}
+              <title>{`Generation ${iteration.generation} · ${iteration.policy_name ?? iteration.id} · ${value.toFixed(3)}°C UTCI relief`}</title>
+            </g>
+          );
+        })}
       </svg>
-      <div className="autoresearch-chart-label"><span>Earlier</span><strong>Overall heat-relief fitness</strong><span>Later</span></div>
+      <div className="autoresearch-lineage-legend"><span><i className="lineage-parent-key" /> parent</span><span><i className="lineage-inspiration-key" /> selected inspirations</span><span><i className="lineage-best-key" /> best</span><strong>Darker nodes = more UTCI relief</strong></div>
     </div>
   );
 };
@@ -303,7 +381,7 @@ export default function AutoresearchNavigator({ activeAoi, onLayout, onUnavailab
             <small>Parent {selected.parent_id ?? "none"}{selected.inspiration_ids?.length ? ` · inspired by ${selected.inspiration_ids.join(", ")}` : ""}</small>
           </div>
           <div className="autoresearch-progress">
-            <ProgressChart iterations={feasible} selectedId={selected.id} onSelect={selectIteration} />
+            <LineageTree iterations={feasible} selectedId={selected.id} bestId={archive?.summary?.best_id} onSelect={selectIteration} />
             <div className="autoresearch-objectives">
               {OBJECTIVES.map((item) => {
                 const value = objective[item.key];

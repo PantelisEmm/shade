@@ -98,14 +98,25 @@ button { color: inherit; }
 .autoresearch-policy p { margin: 2px 0; color: #5b5368; font-size: 11px; line-height: 1.48; }
 .autoresearch-policy small { color: #81798c; font-size: 9px; line-height: 1.4; }
 .autoresearch-progress { min-width: 0; display: grid; grid-template-columns: minmax(220px,1.25fr) minmax(185px,.75fr); gap: 10px; padding-top: 9px; }
-.autoresearch-chart-wrap { min-width: 0; padding: 6px 8px 4px; background: #f0ecf6; border-radius: 9px; }
-.autoresearch-chart { display: block; width: 100%; height: 88px; overflow: visible; }
-.autoresearch-chart line { stroke: #cbd2c8; stroke-width: 1; }
-.autoresearch-chart path { fill: none; stroke: #745ba8; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
-.autoresearch-chart circle { fill: #fff; stroke: #745ba8; stroke-width: 2.5; cursor: pointer; }
-.autoresearch-chart circle.selected { fill: #efc66d; stroke: #493474; }
-.autoresearch-chart-label { display: flex; justify-content: space-between; gap: 8px; color: #81778f; font-size: 8px; }
-.autoresearch-chart-label strong { color: #514366; font-size: 9px; }
+.autoresearch-lineage-wrap { min-width: 0; padding: 7px 8px 5px; background: #f0ecf6; border-radius: 9px; }
+.autoresearch-lineage-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 0 2px 3px; color: #786f88; font-size: 8px; }
+.autoresearch-lineage-heading strong { color: #514366; font-size: 9px; }
+.autoresearch-lineage { display: block; width: 100%; height: 112px; overflow: visible; }
+.lineage-edge { fill: none; stroke: #c8bed7; stroke-width: 1.25; opacity: .72; }
+.lineage-edge.active { stroke: #72579f; stroke-width: 2.2; opacity: 1; }
+.lineage-edge.inspiration { stroke: #b47b42; stroke-width: 1.8; stroke-dasharray: 4 3; opacity: .9; }
+.lineage-node { cursor: pointer; outline: none; }
+.lineage-node circle:first-of-type { stroke: #fff; stroke-width: 1.4; transition: r .14s ease, stroke .14s ease; }
+.lineage-node:hover circle:first-of-type, .lineage-node:focus circle:first-of-type { stroke: #3f315f; stroke-width: 2.2; }
+.lineage-node.ancestor circle:first-of-type { stroke: #72579f; stroke-width: 2; }
+.lineage-node.selected circle:first-of-type { fill: #efc66d !important; stroke: #3f315f; stroke-width: 2.5; }
+.lineage-best-ring { fill: none; stroke: #bd8936; stroke-width: 1.7; stroke-dasharray: 2.4 1.8; pointer-events: none; }
+.autoresearch-lineage-legend { display: flex; align-items: center; gap: 9px; color: #82798e; font-size: 7px; white-space: nowrap; }
+.autoresearch-lineage-legend span { display: flex; align-items: center; gap: 3px; }
+.autoresearch-lineage-legend strong { margin-left: auto; color: #625873; font-size: 7px; font-weight: 700; }
+.autoresearch-lineage-legend i { display: inline-block; width: 12px; height: 0; border-top: 2px solid #72579f; }
+.autoresearch-lineage-legend i.lineage-inspiration-key { border-color: #b47b42; border-top-style: dashed; }
+.autoresearch-lineage-legend i.lineage-best-key { width: 7px; height: 7px; border: 1.5px dashed #bd8936; border-radius: 50%; }
 .autoresearch-objectives { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .autoresearch-objectives > div { min-width: 0; display: grid; grid-template-columns: 6px minmax(0,1fr) 42px; gap: 1px 5px; align-items: center; padding: 5px 6px; background: #f1edf6; border-radius: 6px; }
 .autoresearch-objectives i { grid-row: 1 / 3; width: 6px; height: 18px; border-radius: 4px; }
