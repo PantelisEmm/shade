@@ -2,7 +2,8 @@
 # Downloads all City-of-Boston / Analyze Boston layers used by SHADE.
 # Re-runnable: skips files that already exist. Run from anywhere.
 set -u
-ROOT="$(cd "$(dirname "$0")/../data" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)/data"
+mkdir -p "$ROOT"
 UA="Mozilla/5.0 (SHADE-research-download)"
 
 get () { # get <dest-relative-path> <url>
@@ -33,6 +34,9 @@ get canopy/bprd_trees.csv                     "https://data.boston.gov/dataset/e
 get canopy/bprd_trees_metadata.pdf            "https://data.boston.gov/dataset/e4c76e72-dcf1-40a0-b426-97c52214a9fe/resource/562516f7-8ff2-43a6-bd02-e49f0295c927/download/bprd-trees-metadata.pdf"
 get canopy/canopy_change_2019_2024.zip        "https://data.boston.gov/dataset/b619811b-c52e-417c-a9d0-e82c19f89ca3/resource/7645f9fd-c8d8-4f08-9b6d-6cf35ff895a0/download/2019-2024-data.zip"
 get canopy/canopy_change_2014_2019.zip        "https://data.boston.gov/dataset/b619811b-c52e-417c-a9d0-e82c19f89ca3/resource/8df4dce6-b575-43f4-90ef-2950f50a2b57/download/2014-2019data.zip"
+
+## --- weather (SOLWEIG forcing) ---
+get weather/USA_MA_Boston-Logan.Intl.AP.725090_TMYx.2011-2025.zip "https://www.climate.onebuilding.org/WMO_Region_4_North_and_Central_America/USA_United_States_of_America/MA_Massachusetts/USA_MA_Boston-Logan.Intl.AP.725090_TMYx.2011-2025.zip"
 
 ## --- equity / heat priority (scoring inputs) ---
 get heat/climate_ready_social_vulnerability.geojson "https://bostonopendata-boston.opendata.arcgis.com/api/download/v1/items/34f2c48b670d4b43a617b1540f20efe3/geojson?layers=0"
