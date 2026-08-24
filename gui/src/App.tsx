@@ -1866,6 +1866,7 @@ function App() {
       activeView !== "results"
       || !simulationReady
       || baselineLoadState !== "missing"
+      || Boolean(archivedSimulationFile)
       || simulationMatchesConditions
       || (simulationJob && ["queued", "running"].includes(simulationJob.state))
       || attemptedBaselines.current.has(baselineConditionKey)
@@ -1896,7 +1897,7 @@ function App() {
         setBaselineLoadState("error");
         setSimulationError(error instanceof Error ? error.message : "Unable to start the SOLWEIG baseline");
       });
-  }, [activeView, baselineConditionKey, baselineLoadState, scenario, simulationHour, simulationReady, simulationJob?.id, simulationJob?.state, simulationMatchesConditions]);
+  }, [activeView, archivedSimulationFile, baselineConditionKey, baselineLoadState, scenario, simulationHour, simulationReady, simulationJob?.id, simulationJob?.state, simulationMatchesConditions]);
 
   // The comparison position is stored in raster coordinates, so its screen
   // position follows the same geographic location when the map pans or zooms.
