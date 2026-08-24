@@ -402,7 +402,7 @@ const DEFAULT_RESOLUTION_M = 1;
 const MAP_FRAME_LEFT = 199;
 const MAP_DISPLAY_SIZE = 1000;
 const SHADE_CANOPY_ICON_SPACING_M = 12;
-const SOLWEIG_PHYSICS_VERSION = "gui-solweig-multi-aoi-v2";
+const SOLWEIG_PHYSICS_VERSION = "gui-solweig-multi-aoi-v3-safe-tiling";
 const REFLECTIVE_LOCAL_EFFECT = { mrt: 0, utci: 0.8, surface: 6.1 } as const;
 
 const loadTrees = (): TreeIntervention[] => {
@@ -674,6 +674,8 @@ function App() {
   const strictWorkspaceSanitized = useRef(false);
   const autoresearchModeRef = useRef(autoresearchMode);
   const autoresearchSimulationAttempt = useRef<string | null>(null);
+
+  const archivedSimulationFile = autoresearchCandidate?.simulation_files?.[ACTIVE_AOI]?.[scenario]?.[String(simulationHour)] ?? null;
 
   useEffect(() => {
     autoresearchModeRef.current = autoresearchMode;
@@ -1990,6 +1992,31 @@ function App() {
   };
 
   useEffect(() => {
+    if (!autoresearchMode || !autoresearchRunId || !archivedSimulationFile) return;
+    let cancelled = false;
+    setSimulationResult(null);
+    setSimulationJob(null);
+    setSimulationError(null);
+    const encodedPath = archivedSimulationFile.split("/").map(encodeURIComponent).join("/");
+    fetch(`/api/autoresearch/runs/${encodeURIComponent(autoresearchRunId)}/files/${encodedPath}`, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("The archived SOLWEIG map result is unavailable");
+        return response.json() as Promise<SimulationResult>;
+      })
+      .then((result) => {
+        if (cancelled) return;
+        setSimulationResult(result);
+        setSimulationJob({ id: result.id, mode: "comparison", state: "complete", stage: "Archived result ready", progress: 100, result });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setSimulationJob(null);
+        setSimulationError(error instanceof Error ? error.message : "Unable to load the archived SOLWEIG map");
+      });
+    return () => { cancelled = true; };
+  }, [archivedSimulationFile, autoresearchCandidate?.id, autoresearchMode, autoresearchRunId, simulationHour]);
+
+  useEffect(() => {
     if (
       !autoresearchMode
       || !autoresearchLayoutReady
@@ -2001,6 +2028,7 @@ function App() {
       || activeSimulationRunning
       || simulationMatchesLayout
       || baselineLoadState !== "ready"
+      || Boolean(archivedSimulationFile)
     ) return;
     const attemptKey = `${autoresearchRunId}:${autoresearchCandidate.id}:${ACTIVE_AOI}:${scenario}:${simulationHour}:${policyLayoutSignature}`;
     if (autoresearchSimulationAttempt.current === attemptKey) return;
@@ -2013,6 +2041,7 @@ function App() {
     autoresearchLayoutReady,
     autoresearchMode,
     autoresearchRunId,
+    archivedSimulationFile,
     baselineLoadState,
     hasInterventions,
     policyLayoutSignature,
@@ -4106,7 +4135,7 @@ function App() {
   const displayPixelsForMeters = (meters: number) => (meters / Math.max(manifest?.resolution_m ?? DEFAULT_RESOLUTION_M, 0.01)) * (MAP_DISPLAY_SIZE / Math.max(manifest?.width ?? DEFAULT_GRID_SIZE, 1));
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${autoresearchMode ? "autoresearch-active" : ""}`}>
       <header className="topbar">
         <div className="brand-block">
           <button className="icon-button mobile-menu" aria-label="Open menu"><Menu size={19} /></button>
@@ -4136,7 +4165,6 @@ function App() {
 
       {autoresearchMode && <AutoresearchNavigator
         activeAoi={ACTIVE_AOI}
-        onClose={disableAutoresearch}
         onLayout={applyAutoresearchLayout}
         onUnavailable={clearAutoresearchLayout}
         onCopy={copyAutoresearchToDesign}

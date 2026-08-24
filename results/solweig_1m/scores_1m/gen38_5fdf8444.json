@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "candidate_id": "gen38_5fdf8444",
+  "verdict": "feasible",
+  "physics_version": "gui-solweig-multi-aoi-v3-safe-tiling",
+  "resolution_m": 1.0,
+  "scenario": "baseline",
+  "date": "07-27",
+  "hours": [
+    10,
+    13,
+    16
+  ],
+  "objectives": {
+    "heat_relief_c": 0.015,
+    "access_gain_pp": 0.31,
+    "equity_ratio": 1.693,
+    "equity_relief_c": 0.024,
+    "pooled_relief_c": 0.014,
+    "equity_pop_share": 0.38,
+    "equity_aois": 2,
+    "cobenefit_greened_pct": 0.138,
+    "cost_efficiency_person_c_per_100k": 22.377,
+    "worst_aoi_heat_relief_c": 0.004,
+    "worst_aoi": "chinatown",
+    "worst_scenario_heat_relief_c": 0.015,
+    "worst_scenario": "baseline",
+    "tmrt_relief_c": 0.066,
+    "expected_relief_c": null,
+    "plan_survival": null,
+    "pv_mwh_per_yr": 0.0,
+    "spend_usd": 1499760.0,
+    "per_aoi_heat_relief_c": {
+      "chinatown": 0.004,
+      "brighton": 0.018,
+      "grove_hall": 0.022
+    },
+    "per_scenario_heat_relief_c": {
+      "baseline": 0.015
+    }
+  },
+  "runs": [
+    {
+      "aoi": "chinatown",
+      "split": "train",
+      "scenario": "baseline",
+      "spend_usd": 499920.0,
+      "n_timesteps": 3,
+      "baseline_cached": true,
+      "metrics": {
+        "heat_relief_c": 0.004,
+        "access_gain_pp": 0.045,
+        "equity_ratio": null,
+        "equity_relief_c": 0.184,
+        "equity_pop_share": 0.013,
+        "equity_pop": 112.0,
+        "equity_person_degc": 20.6,
+        "cobenefit_greened_pct": 0.165,
+        "pv_mwh_per_yr": 0.0,
+        "cost_efficiency_person_c_per_100k": 7.034,
+        "tmrt_relief_c": 0.017,
+        "shade_hours_gain": 0.0,
+        "person_degc": 35.2,
+        "pop_exposed": 8843.4,
+        "unshaded_pct_before": 68.918
+      }
+    },
+    {
+      "aoi": "brighton",
+      "split": "train",
+      "scenario": "baseline",
+      "spend_usd": 499920.0,
+      "n_timesteps": 3,
+      "baseline_cached": true,
+      "metrics": {
+        "heat_relief_c": 0.018,
+        "access_gain_pp": 0.409,
+        "equity_ratio": null,
+        "equity_relief_c": null,
+        "equity_pop_share": 0.0,
+        "equity_pop": 0.0,
+        "equity_person_degc": 0.0,
+        "cobenefit_greened_pct": 0.115,
+        "pv_mwh_per_yr": 0.0,
+        "cost_efficiency_person_c_per_100k": 20.976,
+        "tmrt_relief_c": 0.081,
+        "shade_hours_gain": 0.0,
+        "person_degc": 104.9,
+        "pop_exposed": 5755.0,
+        "unshaded_pct_before": 73.103
+      }
+    },
+    {
+      "aoi": "grove_hall",
+      "split": "train",
+      "scenario": "baseline",
+      "spend_usd": 499920.0,
+      "n_timesteps": 3,
+      "baseline_cached": true,
+      "metrics": {
+        "heat_relief_c": 0.022,
+        "access_gain_pp": 0.475,
+        "equity_ratio": 1.0,
+        "equity_relief_c": 0.022,
+        "equity_pop_share": 1.0,
+        "equity_pop": 8781.2,
+        "equity_person_degc": 195.5,
+        "cobenefit_greened_pct": 0.135,
+        "pv_mwh_per_yr": 0.0,
+        "cost_efficiency_person_c_per_100k": 39.115,
+        "tmrt_relief_c": 0.099,
+        "shade_hours_gain": 0.0,
+        "person_degc": 195.5,
+        "pop_exposed": 8781.2,
+        "unshaded_pct_before": 77.347
+      }
+    }
+  ],
+  "generated_utc": "2026-08-24T09:21:56.781566+00:00"
+}

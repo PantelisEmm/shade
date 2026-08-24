@@ -7,7 +7,6 @@ import {
   Copy,
   GitBranch,
   LoaderCircle,
-  X,
 } from "lucide-react";
 
 export type ArchivedMask = {
@@ -54,6 +53,9 @@ export type ArchiveIteration = {
   timestamp_utc?: string;
   layout_files?: Record<string, string>;
   score_files?: Record<string, string>;
+  simulation_files?: Record<string, Record<string, Record<string, string>>>;
+  score_resolution_m?: number;
+  score_physics_version?: string;
 };
 
 export type Archive = {
@@ -85,7 +87,6 @@ type RunSummary = {
 
 type Props = {
   activeAoi: string;
-  onClose: () => void;
   onLayout: (layout: ArchivedLayout, iteration: ArchiveIteration, archive: Archive, runId: string) => void;
   onUnavailable: (iteration: ArchiveIteration | null, runId: string | null) => void;
   onCopy: () => void;
@@ -161,7 +162,7 @@ const Sparkline = ({ values, color }: { values: (number | null | undefined)[]; c
   return <svg className="autoresearch-sparkline" viewBox="0 0 64 16" aria-hidden="true"><path d={path} style={{ stroke: color }} /></svg>;
 };
 
-export default function AutoresearchNavigator({ activeAoi, onClose, onLayout, onUnavailable, onCopy, onSelectAoi }: Props) {
+export default function AutoresearchNavigator({ activeAoi, onLayout, onUnavailable, onCopy, onSelectAoi }: Props) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState(() => localStorage.getItem(RUN_STORAGE_KEY) ?? "");
   const [archive, setArchive] = useState<Archive | null>(null);
@@ -287,7 +288,6 @@ export default function AutoresearchNavigator({ activeAoi, onClose, onLayout, on
           {archive?.state === "running" ? "Live · polling" : archive ? "Archive complete" : "Waiting"}
         </span>
         <button className="autoresearch-expand" onClick={() => setExpanded((value) => !value)}>{expanded ? "Hide details" : "Show details"}</button>
-        <button className="autoresearch-close" aria-label="Turn off autoresearch mode" onClick={onClose}><X size={17} /></button>
       </div>
 
       {expanded && <div className="autoresearch-details">
